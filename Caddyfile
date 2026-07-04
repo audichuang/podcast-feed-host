@@ -1,0 +1,21 @@
+# Static podcast host. TLS is terminated by Cloudflare (Tunnel), so we serve
+# plain HTTP on :80 inside the compose network. file_server handles Range
+# requests (HTTP 206 for scrubbing/resume) and Content-Type by extension.
+:80 {
+	root * /srv
+	file_server
+
+	# Media filenames are content-versioned (EP01-<hash>.mp3), so the bytes at a
+	# given URL never change -> cache forever.
+	@mp3 path *.mp3
+	header @mp3 Cache-Control "public, max-age=31536000, immutable"
+
+	# The feed itself changes when new episodes publish -> always revalidate,
+	# and serve the Content-Type Apple expects for RSS.
+	@feedxml path */feed.xml
+	header @feedxml Cache-Control "no-cache"
+	header @feedxml Content-Type "application/rss+xml; charset=utf-8"
+
+	# Lightweight liveness endpoint for `docker compose ps` / uptime checks.
+	respond /healthz 200
+}

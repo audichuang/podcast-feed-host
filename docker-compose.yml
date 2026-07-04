@@ -1,0 +1,24 @@
+# Podcast feed hosting for a NAS: prebuilt Caddy image (from GHCR) + Cloudflare
+# Tunnel. Caddy serves $FEEDS_ROOT_HOST/feeds/<token>/... over plain HTTP inside
+# the compose network only (no host port published). Cloudflared connects OUT to
+# Cloudflare and routes your public hostname -> http://caddy:80, so the NAS needs
+# no open router port, no static IP, no local TLS cert.
+#
+# Setup: `cp .env.example .env`, fill FEEDS_ROOT_HOST + TUNNEL_TOKEN, then
+# `docker compose up -d`. See README.md.
+services:
+  caddy:
+    image: ghcr.io/audichuang/podcast-feed-host:latest
+    restart: unless-stopped
+    pull_policy: always
+    volumes:
+      # The directory your feed generator writes into. Mounted read-only:
+      # the host only serves these files, never mutates them.
+      - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv:ro
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    depends_on:
+      - caddy
