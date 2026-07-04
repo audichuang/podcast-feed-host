@@ -18,4 +18,8 @@
 
 	# Lightweight liveness endpoint for `docker compose ps` / uptime checks.
 	respond /healthz 200
+
+	# Internal audit state — never expose (contains notebook_id / internal state).
+	# (owner_email is already public in feed.xml; this 403 is about notebook_id.)
+	respond /feeds/*/show.json 403
 }

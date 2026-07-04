@@ -1,22 +1,33 @@
-# Podcast feed hosting for a NAS. Just a Caddy static server that YOUR EXISTING
-# Cloudflare Tunnel points at — no cloudflared here, since you already run one.
-#
-# cloudflared can't serve files itself; it only forwards a public hostname to an
-# internal address. So Caddy serves the feed directory on a host port, and you
-# add ONE ingress rule to your existing tunnel:
-#     <your-hostname>  ->  http://<this-host-lan-ip>:${HOST_PORT}
-#
-# Setup: `cp .env.example .env`, fill FEEDS_ROOT_HOST, then `docker compose up -d`.
+# Podcast feed hosting on a NAS, read/write split. Your EXISTING Cloudflare
+# Tunnel points ONE hostname at the read port:
+#   podcast.你的域名 -> http://<lan-ip>:${HOST_PORT}   (caddy, read, public)
+# The write port is LAN-only and is NOT in the tunnel; MCP hosts on the same
+# network PUT to it directly. Both services share one dir: caddy ro, uploader rw.
 services:
-  caddy:
+  caddy:                       # READ half — public static serving, read-only
     image: ghcr.io/audichuang/podcast-feed-host:latest
     restart: unless-stopped
     pull_policy: always
     ports:
-      # Published on the host so your existing cloudflared can reach it.
-      # Change HOST_PORT in .env if 8080 is already taken.
       - "${HOST_PORT:-8080}:80"
     volumes:
-      # The directory your feed generator writes into. Mounted read-only:
-      # the host only serves these files, never mutates them.
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv:ro
+
+  uploader:                    # WRITE half — LAN-only, token-gated, read-write
+    image: ghcr.io/audichuang/podcast-feed-uploader:latest
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN:?set UPLOAD_TOKEN in .env}
+    ports:
+      # Bind to the NAS LAN IP ONLY (not 0.0.0.0), so the write port is never
+      # exposed on a public/WAN/IPv6 interface. Never add it to the tunnel.
+      - "${UPLOAD_BIND:?set UPLOAD_BIND to the NAS LAN IP in .env}:${UPLOAD_PORT:-8086}:80"
+    volumes:
+      - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:80/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
