@@ -8,10 +8,12 @@ T = "abcdefghijklmnopqrstuvwx"  # 24 chars in [a-z2-7]
 
 def test_path_allowlist():
     ok = [f"/feeds/{T}/feed.xml", f"/feeds/{T}/index.html", f"/feeds/{T}/show.json",
-          f"/feeds/{T}/artwork.png", f"/feeds/{T}/artwork.jpg", f"/feeds/{T}/EP01-deadbeef.mp3"]
+          f"/feeds/{T}/artwork.png", f"/feeds/{T}/artwork.jpg", f"/feeds/{T}/EP01-deadbeef.mp3",
+          f"/feeds/{T}/EP01-cover-deadbeef.jpg", f"/feeds/{T}/EP12-cover-0a1b2c3d.png"]
     bad = [f"/feeds/{T}/../../etc/passwd", f"/feeds/{T}/evil.sh", "/feeds/SHORT/feed.xml",
            f"/feeds/{T}/feed.xml/..", f"/{T}/feed.xml", f"/feeds/{T}/EP1-deadbeef.mp3",
-           f"/feeds/{T}/EP100-deadbeef.mp3"]
+           f"/feeds/{T}/EP100-deadbeef.mp3", f"/feeds/{T}/EP01-cover-deadbeef.gif",
+           f"/feeds/{T}/EP01-cover-deadbeef.mp3"]
     assert all(server._PATH_RE.match(p) for p in ok)
     assert not any(server._PATH_RE.match(p) for p in bad)
 
