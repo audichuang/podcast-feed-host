@@ -69,6 +69,35 @@ def test_handler_end_to_end():
         finally:
             httpd.shutdown(); s.ROOT = old_root
 
+def test_put_accepts_pdf_and_html():
+    """單集附件(簡報 PDF / 研讀講義 HTML)走跟 mp3 一樣的 EP<n>-<hash8> 命名,應收 201。"""
+    import server as s
+    old_root = s.ROOT
+    with tempfile.TemporaryDirectory() as d:
+        s.ROOT = d
+        httpd, base = _serve()
+        try:
+            for name in ("EP01-deadbeef.pdf", "EP01-0a1b2c3d.html"):
+                code, _ = _req("PUT", f"{base}/feeds/{T}/{name}", data=b"x", token="testtoken")
+                assert code == 201, name
+        finally:
+            httpd.shutdown(); s.ROOT = old_root
+
+def test_put_still_rejects_non_whitelisted():
+    """放寬只加 pdf/html 副檔名,信任邊界不鬆:非白名單副檔名、錯 EP 格式仍 404。"""
+    import server as s
+    old_root = s.ROOT
+    with tempfile.TemporaryDirectory() as d:
+        s.ROOT = d
+        httpd, base = _serve()
+        try:
+            for name in ("notes.txt", "evil.pdf", "EP1-deadbeef.pdf"):
+                code, _ = _req("PUT", f"{base}/feeds/{T}/{name}", data=b"x", token="testtoken")
+                assert code == 404, name
+        finally:
+            httpd.shutdown(); s.ROOT = old_root
+
 if __name__ == "__main__":
     test_path_allowlist(); test_atomic_write_roundtrip(); test_handler_end_to_end()
+    test_put_accepts_pdf_and_html(); test_put_still_rejects_non_whitelisted()
     print("ok")
