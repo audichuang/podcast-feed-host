@@ -26,7 +26,7 @@ MAX_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))  # 5
 #   token: base32 lower of 15 bytes = exactly 24 chars of [a-z2-7]
 #   name : exactly the set publish_series renders (EP\d{2} => <=99 episodes/feed)
 _TOKEN = r"[a-z2-7]{24}"
-_NAME = r"(?:feed\.xml|index\.html|show\.json|artwork\.(?:png|jpg)|EP\d{2}-[0-9a-f]{8}\.(?:mp3|pdf|html)|EP\d{2}-cover-[0-9a-f]{8}\.(?:jpg|png))"
+_NAME = r"(?:feed\.xml|index\.html|show\.json|artwork(?:-[0-9a-f]{8})?\.(?:png|jpg)|EP\d{2}-[0-9a-f]{8}\.(?:mp3|pdf|html)|EP\d{2}-cover-[0-9a-f]{8}\.(?:jpg|png))"
 _PATH_RE = re.compile(rf"^/feeds/({_TOKEN})/({_NAME})$")
 _CHUNK = 1 << 20
 
