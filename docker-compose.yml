@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
     pull_policy: always
     ports:
-      - "${HOST_PORT:-8080}:80"
+      - "${HOST_PORT:-8085}:80"
     volumes:
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv:ro
       # The image bakes the Caddyfile in too, but the MOUNT is what's live: a config

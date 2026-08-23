@@ -26,6 +26,10 @@
   `safe_orphans()` 重新推導。新增任何破壞性端點都要沿用這個形狀。
 - POST-only + `X-Confirm` 自訂標頭 + **Host 必須是 IP**(擋 DNS rebinding —— 只比對
   `Origin == http://{Host}` 等於自己跟自己比)。這一關對 GET 也生效。
+- **每條路徑都要呼叫 `_audit()`** —— 成功與每一道 guard 拒絕都要。刪除是硬刪、沒有備份,
+  而 docker 的事件緩衝只留幾分鐘,這是事後唯一能回答「誰在什麼時候刪了什麼」的地方。
+  `log_message` 把 GET 全靜音是刻意的(一次載入十幾個請求),但**破壞性動作不准跟著靜音**。
+  IP 欄位是 docker bridge gateway 不是 LAN 來源機器(port publishing 會 SNAT)。
 
 ## `_JS` / `_CSS` 必須是 raw string
 

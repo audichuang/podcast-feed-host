@@ -7,7 +7,10 @@ name: build-and-push
 on:
   push:
     branches: [main]
-    paths: [Dockerfile, Caddyfile, "uploader/**", "dashboard/**", .github/workflows/build.yml]
+    # `!**/*.md` 放最後(後面的 pattern 優先):純文件改動不該重建 image ——
+    # metadata 帶 commit SHA,digest 一定不同,watchtower 就會去重建生產容器。
+    paths: [Dockerfile, Caddyfile, "uploader/**", "dashboard/**",
+            .github/workflows/build.yml, "!**/*.md"]
   workflow_dispatch:
 permissions: {contents: read, packages: write}
 jobs:

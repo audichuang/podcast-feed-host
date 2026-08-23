@@ -32,12 +32,12 @@ cd podcast-feed-host
 cp .env.example .env
 # 編輯 .env:
 #   FEEDS_ROOT_HOST=/volume1/podcasts   # NAS 上放 feed 的目錄
-#   HOST_PORT=8080                      # Caddy 對外的 host port(被佔就改)
+#   HOST_PORT=8085                      # Caddy 對外的 host port(被佔就改)
 #   UPLOAD_BIND=192.168.x.x             # NAS 的 LAN IP(不要填 0.0.0.0)
 #   UPLOAD_PORT=8086                    # uploader 對內的 host port
 #   UPLOAD_TOKEN=                       # 與 Doppler PODCAST_UPLOAD_TOKEN 逐字元相同
 docker compose up -d
-curl -s http://localhost:${HOST_PORT:-8080}/healthz   # 回 200 即讀站服務正常
+curl -s http://localhost:${HOST_PORT:-8085}/healthz   # 回 200 即讀站服務正常
 ```
 
 用的是 GHCR 上預先 build 好的 image,NAS **不需 build**。
@@ -59,20 +59,20 @@ pull + 重啟(只動貼了 `watchtower.enable` label 的 **caddy / dashboard**,�
 **A. Dashboard 管理(remote config)**
 Zero Trust → Networks → Tunnels → 你的 tunnel → **Public Hostname → Add**:
 - Subdomain/Domain:例 `podcast` + 你的域名 → 對外 `https://podcast.你的域名`
-- Service:**HTTP**,URL `<這台機器內網IP>:8080`
+- Service:**HTTP**,URL `<這台機器內網IP>:8085`(= `HOST_PORT`)
 
 **B. 本地 `config.yml`(local config)**
 在 `ingress:` 加一條(放在 `service: http_status:404` 那條**之前**):
 ```yaml
 ingress:
   - hostname: podcast.你的域名
-    service: http://<這台機器內網IP>:8080
+    service: http://<這台機器內網IP>:8085
   - service: http_status:404
 ```
 改完 `cloudflared` 重啟。
 
 > ⚠️ **別用 `localhost`**:如果你的 cloudflared 是跑在 docker 容器裡,`localhost` 指的是
-> 它自己、連不到 Caddy。用**這台機器的內網 IP**(例 `192.168.x.x:8080`)最不會錯,不管
+> 它自己、連不到 Caddy。用**這台機器的內網 IP**(例 `192.168.x.x:8085`)最不會錯,不管
 > cloudflared 是裝在主機還是容器都通。
 
 ## 部署驗收
