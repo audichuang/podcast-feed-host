@@ -27,6 +27,7 @@ import mimetypes
 import os
 import re
 import shutil
+import sys
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -1280,18 +1281,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
         parts = [p for p in path.split("/") if p]
         if len(parts) != 2 or parts[0] != "api" or parts[1] not in self._API:
+            self._audit(path, {}, "拒絕:不存在的端點")
             return self._jout(404, {"error": "不存在的端點"})
         # CSRF:這頁沒有登入態,而 POST 可以刪檔。自訂標頭會逼出 CORS preflight,
         # 跨來源頁面送不出去;Origin 再比對一次。兩道都便宜。
-        if not self._host_ok():
-            return self._jout(403, {"error": "Host 必須是 IP(見 ALLOWED_HOSTS)"})
-        if self.headers.get("X-Confirm") != "1":
-            return self._jout(403, {"error": "缺少確認標頭"})
-        origin = self.headers.get("Origin")
-        if origin and origin != f"http://{self.headers.get('Host', '')}":
-            return self._jout(403, {"error": "跨來源請求"})
-        if not writable():
-            return self._jout(403, {"error": "/srv 是唯讀掛載,這台不開放刪除"})
+        for bad, why in (
+            (not self._host_ok(), "Host 必須是 IP(見 ALLOWED_HOSTS)"),
+            (self.headers.get("X-Confirm") != "1", "缺少確認標頭"),
+            (bool(self.headers.get("Origin"))
+             and self.headers.get("Origin") != f"http://{self.headers.get('Host', '')}",
+             "跨來源請求"),
+            (not writable(), "/srv 是唯讀掛載,這台不開放刪除"),
+        ):
+            if bad:
+                self._audit(parts[1], {}, "拒絕:" + why)
+                return self._jout(403, {"error": why})
         try:
             length = int(self.headers.get("Content-Length") or 0)
             # 負數會讓 rfile.read(-1) 一路讀到 EOF —— 請求永遠不回應、執行緒卡住。
@@ -1332,9 +1336,12 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 msg = f"已永久刪除,釋出 {_size(purge_trash(body.get('entry') or ''))}"
         except ValueError as e:
+            self._audit(parts[1], locals().get("body") or {}, f"拒絕:{e}")
             return self._jout(400, {"error": str(e)})
         except OSError as e:
+            self._audit(parts[1], locals().get("body") or {}, f"檔案系統錯誤:{e}")
             return self._jout(500, {"error": f"檔案系統錯誤:{e}"})
+        self._audit(parts[1], body, msg)
         return self._jout(200, {"msg": msg})
 
     def _file(self, tok: str, name: str, thumb: bool = False):
@@ -1442,7 +1449,24 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, b"not found", "text/plain")
 
     def log_message(self, *a):
+        # GET 一律安靜:這頁自己一次載入就是十幾個請求,逐條記只會把真的錯誤淹掉。
+        # 破壞性動作走 `_audit`,那個一定要留下軌跡 —— 見它的 docstring。
         pass
+
+    def _audit(self, action: str, body: dict, outcome: str) -> None:
+        """把破壞性動作寫進 container log。
+
+        **這是唯一的稽核軌跡。** 舊版檔的刪除是硬刪、沒有備份,而 docker 的事件緩衝
+        只留幾分鐘 —— 事後要回答「誰在什麼時候刪了什麼」只剩這裡。實際踩過:一輪
+        瀏覽器測試把三個節目搬進垃圾桶,而因為沒有這條 log,無法逐一歸因。
+        `confirm` 不記(那是使用者打進去的字串,沒有稽核價值)。
+        """
+        sys.stderr.write("%s AUDIT %s %s %s -> %s\n" % (
+            datetime.now().isoformat(timespec="seconds"),
+            self.client_address[0] if self.client_address else "-", action,
+            json.dumps({k: v for k, v in body.items() if k != "confirm"},
+                       ensure_ascii=False, sort_keys=True), outcome))
+        sys.stderr.flush()
 
 
 if __name__ == "__main__":

@@ -37,8 +37,12 @@ services:
       - "${UPLOAD_BIND:?set UPLOAD_BIND to the NAS LAN IP in .env}:${UPLOAD_PORT:-8086}:80"
     volumes:
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+    # NO watchtower label — deliberately. This is the publisher's only write path:
+    # recreating it mid-publish breaks the season that is in flight, and the CI
+    # matrix rebuilds all three images on every push, so an unattended updater
+    # would restart it on changes that have nothing to do with it. Update it by
+    # hand (`compose pull uploader && up -d --no-deps uploader`) when no publish
+    # is running — the same rule AGENTS.md states for touching it at all.
     healthcheck:
       test: ["CMD", "python3", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:80/healthz',timeout=3).status==200 else 1)"]

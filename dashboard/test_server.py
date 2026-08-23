@@ -653,6 +653,37 @@ def test_confirmations_use_an_in_page_dialog_not_browser_popups():
             assert "<button type=button id=dno" in h      # 取消鍵不是 submit
 
 
+def test_destructive_actions_leave_an_audit_trail():
+    """刪除是硬刪、沒有備份,而 docker 的事件緩衝只留幾分鐘 —— 沒有這條 log,事後
+    無法回答「誰在什麼時候刪了什麼」。實際踩過:一輪瀏覽器測試把三個節目搬進垃圾桶,
+    因為 log 被整個靜音而無法歸因。GET 仍然安靜(那是刻意的)。"""
+    import io, sys as _sys
+    with tempfile.TemporaryDirectory() as root:
+        _fixture(root, extra_files=["EP01-99999999.mp3"])
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        p = srv.server_address[1]
+        cap, real = io.StringIO(), _sys.stderr
+        _sys.stderr = cap
+        try:
+            _req(p, "/")                                   # GET 不該留 log
+            _req(p, "/storage")
+            r = urllib.request.Request(
+                f"http://127.0.0.1:{p}/api/delete-orphans", method="POST",
+                data=b'{"token":"' + T.encode() + b'"}',
+                headers={"Content-Type": "application/json", "X-Confirm": "1"})
+            urllib.request.urlopen(r, timeout=5).read()
+            time.sleep(0.2)
+        finally:
+            _sys.stderr = real
+            srv.shutdown()
+        lines = [l for l in cap.getvalue().split("\n") if "AUDIT" in l]
+        assert len(lines) == 1, cap.getvalue()             # 只有破壞性動作那一筆
+        assert "delete-orphans" in lines[0] and T in lines[0]
+        assert "刪掉 1 個舊版檔" in lines[0]
+        assert "127.0.0.1" in lines[0]
+
+
 def _req(port, path, headers=None):
     r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers or {})
     try:
