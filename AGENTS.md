@@ -44,10 +44,15 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 - **`Caddyfile` 生效的是掛載那份**(`compose` 的 `./Caddyfile:/etc/caddy/Caddyfile:ro`);
   image 裡也 `COPY` 了一份當預設。改 Caddyfile → 同步到 NAS + `restart caddy`,不必等 CI。
   兩份保持一致。
-- **三個 service 都走同一條發布路:CI → GHCR → watchtower。** 沒有本機 build、沒有
-  bind-mount 程式碼。`dashboard/server.py` 是烤進 image 的 —— **改了程式要 push 讓 CI 建**,
-  在 NAS 上覆蓋檔案不會生效(也不該掛進去:一份過期的本機檔會靜默蓋掉 CI 建出來的版本)。
-  三個 image 各自的 GHCR package 都要是 Public,NAS 才能免登入 pull。
+- **三個 image 都由 CI 建、NAS 只 pull。** 沒有本機 build、沒有 bind-mount 程式碼。
+  `dashboard/server.py` 是烤進 image 的 —— **改了程式要 push 讓 CI 建**,在 NAS 上覆蓋
+  檔案不會生效(也不該掛進去:一份過期的本機檔會靜默蓋掉 CI 建出來的版本)。
+- **但只有 caddy 與 dashboard 貼 watchtower label,uploader 刻意沒貼。** CI matrix 每次
+  push 都重建三個 image,而 metadata 帶 commit SHA → digest 一定不同 → 貼了 label 的服務
+  會被無人值守地重建。caddy 重建是一秒的讀取空窗、dashboard 只有你在看,都無所謂;
+  **uploader 在發布中途被重建就是那一季壞掉**,而它可能因為一個跟它無關的改動被重建。
+  更新 uploader 是手動的:`compose pull uploader && up -d --no-deps uploader`,挑沒有發布
+  在跑的時候。(這就是上面那條「動它之前先確認沒有發布在跑」的必然結論。)
 
 ## 改完必跑
 

@@ -1460,6 +1460,11 @@ class Handler(BaseHTTPRequestHandler):
         只留幾分鐘 —— 事後要回答「誰在什麼時候刪了什麼」只剩這裡。實際踩過:一輪
         瀏覽器測試把三個節目搬進垃圾桶,而因為沒有這條 log,無法逐一歸因。
         `confirm` 不記(那是使用者打進去的字串,沒有稽核價值)。
+
+        **IP 那一欄不要當成 LAN 上的來源機器。** docker 的 port publishing 會 SNAT,
+        容器看到的是 bridge gateway(例如 192.168.96.1),不是打進來的那台。有價值的是
+        「什麼時候、對什麼、做了什麼、結果」;要真的來源 IP 得改 host network,而那會
+        破壞「只綁 LAN IP」這個模型 —— 不值得。
         """
         sys.stderr.write("%s AUDIT %s %s %s -> %s\n" % (
             datetime.now().isoformat(timespec="seconds"),

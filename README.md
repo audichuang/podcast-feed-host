@@ -43,8 +43,11 @@ curl -s http://localhost:${HOST_PORT:-8080}/healthz   # 回 200 即讀站服務�
 用的是 GHCR 上預先 build 好的 image,NAS **不需 build**。
 
 **自動更新**:compose 內建一個 **watchtower** 服務,每 5 分鐘 poll GHCR,image 有新版就自動
-pull + 重啟(只動貼了 `watchtower.enable` label 的 caddy / uploader,不會誤動 NAS 上其他
-stack)。注意 `pull_policy: always` **本身不會**自動更新——它只在 `docker compose up` 當下 pull
+pull + 重啟(只動貼了 `watchtower.enable` label 的 **caddy / dashboard**,不會誤動 NAS 上
+其他 stack)。**`uploader` 刻意沒貼那個 label** —— 它是發布器唯一的寫入口,在發布中途被重建
+就是那一季壞掉,而 CI matrix 每次 push 都重建三個 image(metadata 帶 commit SHA,digest 一定
+不同),所以它可能因為一個跟它無關的改動被重建。更新它是手動的:
+`docker compose pull uploader && docker compose up -d --no-deps uploader`,挑沒有發布在跑的時候。注意 `pull_policy: always` **本身不會**自動更新——它只在 `docker compose up` 當下 pull
 一次,所以自動更新是靠 watchtower。想改手動就把 watchtower 服務刪掉,自己
 `docker compose pull && docker compose up -d`。
 
@@ -134,8 +137,12 @@ $FEEDS_ROOT_HOST/
 Host 必須是 IP 字面值(擋 DNS rebinding),要用網域名得設 `ALLOWED_HOSTS`。
 
 實作是**單一 stdlib-only Python 檔**(`dashboard/server.py`),烤進 image,
-更新走 CI → GHCR → watchtower,跟 caddy / uploader 同一條路。
-離線可測:`python3 dashboard/test_server.py`(29 個測試,無第三方相依)。
+更新走 CI → GHCR → watchtower(跟 caddy 同一條路;`uploader` 是手動的,見上)。
+離線可測:`python3 dashboard/test_server.py`(30 個測試,無第三方相依)。
+
+**每個破壞性動作都會寫一行稽核 log 到 container log**(時間、client IP、動作、body、結果),
+含每一道被擋下的 guard;GET 一律安靜。刪除是硬刪、沒有備份,而 docker 的事件緩衝只留幾分鐘 ——
+`docker logs podcast-feed-host-dashboard-1 | grep AUDIT` 是事後唯一能回答「誰刪了什麼」的地方。
 
 唯一的相依是 **Pillow,而且只為了縮圖**:節目封面是 Apple 規格的 3000×3000
 (每張 0.5–8.7 MB),畫面上最大只用到 160 px。首頁 16 張原圖 = 24 MB 傳輸 +
