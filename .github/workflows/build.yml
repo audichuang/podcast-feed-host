@@ -1,20 +1,40 @@
 name: build-and-push
-# Build BOTH images (read: Caddy static server; write: token-gated uploader)
-# and push to GHCR. NAS then `docker compose pull && up -d`.
+# Build all three images and push to GHCR; the NAS only ever pulls.
+#   podcast-feed-host      read  — Caddy static server (Caddyfile baked in as the default)
+#   podcast-feed-uploader  write — token-gated PUT endpoint the publisher talks to
+#   podcast-feed-dashboard admin — read-only catalog + delete (Pillow for thumbnails)
+# NAS then `docker compose pull && up -d`; watchtower picks new images up on its own.
 on:
   push:
     branches: [main]
-    paths: [Dockerfile, Caddyfile, "uploader/**", .github/workflows/build.yml]
+    paths: [Dockerfile, Caddyfile, "uploader/**", "dashboard/**", .github/workflows/build.yml]
   workflow_dispatch:
 permissions: {contents: read, packages: write}
 jobs:
+  # 兩支服務都是 stdlib-only + assert,沒有 framework、沒有 fixture。跑得夠快,
+  # 所以讓它擋在 build 前面 —— 壞掉的 commit 不該推出一個 image 到 GHCR。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.x"}
+      # dashboard 的縮圖測試在沒有 Pillow 時會自己跳過 —— CI 裝上,讓它真的跑到
+      - run: pip install --quiet pillow
+      - run: python3 test_server.py
+        working-directory: uploader
+      - run: python3 test_server.py
+        working-directory: dashboard
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - {name: podcast-feed-host,     context: .,          file: ./Dockerfile}
           - {name: podcast-feed-uploader, context: ./uploader, file: ./uploader/Dockerfile}
+          - {name: podcast-feed-dashboard, context: ./dashboard, file: ./dashboard/Dockerfile}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
