@@ -3,6 +3,12 @@
 #   podcast.你的域名 -> http://<lan-ip>:${HOST_PORT}   (caddy, read, public)
 # The write port is LAN-only and is NOT in the tunnel; MCP hosts on the same
 # network PUT to it directly. Both services share one dir: caddy ro, uploader rw.
+#
+# Auto-update: the watchtower service below polls GHCR every 5 min and restarts
+# a container when its image changes. `pull_policy: always` alone does NOT do
+# this — it only pulls at `docker compose up`, so without watchtower you'd stay
+# on whatever version you last ran up. Prefer manual updates? Delete the
+# watchtower service and run `docker compose pull && docker compose up -d`.
 services:
   caddy:                       # READ half — public static serving, read-only
     image: ghcr.io/audichuang/podcast-feed-host:latest
@@ -12,6 +18,12 @@ services:
       - "${HOST_PORT:-8080}:80"
     volumes:
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv:ro
+      # The image bakes the Caddyfile in too, but the MOUNT is what's live: a config
+      # change (e.g. blocking the dashboard's _trash tree) then needs a file copy +
+      # restart instead of a CI image round trip. Keep both copies identical.
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   uploader:                    # WRITE half — LAN-only, token-gated, read-write
     image: ghcr.io/audichuang/podcast-feed-uploader:latest
@@ -25,9 +37,52 @@ services:
       - "${UPLOAD_BIND:?set UPLOAD_BIND to the NAS LAN IP in .env}:${UPLOAD_PORT:-8086}:80"
     volumes:
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     healthcheck:
       test: ["CMD", "python3", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:80/healthz',timeout=3).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  dashboard:                   # ADMIN 管理後端 — LAN-only, never in the tunnel
+    image: ghcr.io/audichuang/podcast-feed-dashboard:latest
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      # Only used to render the copyable feed URL on the show page. Media links
+      # are served by this container itself (it mounts /srv), so an unset or
+      # wrong value degrades to a relative URL — it never breaks the page.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    ports:
+      # Same rule as the uploader: bind the NAS LAN IP ONLY. This page lists every
+      # feed token, and the token IS the access control for an unlisted feed —
+      # putting it behind the tunnel publishes all of them at once.
+      - "${UPLOAD_BIND:?set UPLOAD_BIND to the NAS LAN IP in .env}:${DASH_PORT:-8087}:80"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    volumes:
+      # No code mount: server.py is baked into the image (see dashboard/Dockerfile),
+      # so updates flow CI -> GHCR -> watchtower like the other two services.
+      # rw is what enables the delete buttons — `writable()` is literally
+      # `os.access(ROOT, os.W_OK)`. Flip this back to `:ro` and restart to disable
+      # every destructive action (buttons stop rendering, endpoints return 403).
+      - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv:rw
+
+  watchtower:                  # AUTO-UPDATE — polls GHCR, restarts on new image
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # If you kept the GHCR packages PRIVATE (README says make them Public),
+    # uncomment these so watchtower can pull. GHCR_USER = your GitHub username,
+    # GHCR_PAT = a classic PAT with `read:packages` (set both in .env).
+    # environment:
+    #   - REPO_USER=${GHCR_USER}
+    #   - REPO_PASS=${GHCR_PAT}
+    command:
+      - --interval
+      - "300"                  # poll every 5 min
+      - --label-enable         # only touch containers labelled above (not other stacks on this NAS)
+      - --cleanup              # delete the old image after updating

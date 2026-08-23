@@ -21,5 +21,14 @@
 
 	# Internal audit state — never expose (contains notebook_id / internal state).
 	# (owner_email is already public in feed.xml; this 403 is about notebook_id.)
-	respond /feeds/*/show.json 403
+	#
+	# path_regexp, NOT a path glob: Caddy's `*` does not span `/` (measured), so
+	# `/feeds/*/show.json` misses a show.json one level deeper — which is exactly
+	# what happens when the dashboard moves a whole show into `_trash/<entry>/`.
+	@internal path_regexp (^|/)show\.json$
+	respond @internal 403
+
+	# The dashboard's trash: a deleted show keeps its bytes here until it is purged.
+	# It must not become publicly readable again at a new URL.
+	respond /_trash/* 404
 }
