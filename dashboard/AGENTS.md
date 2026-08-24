@@ -26,6 +26,14 @@
   `safe_orphans()` 重新推導。新增任何破壞性端點都要沿用這個形狀。
 - POST-only + `X-Confirm` 自訂標頭 + **Host 必須是 IP**(擋 DNS rebinding —— 只比對
   `Origin == http://{Host}` 等於自己跟自己比)。這一關對 GET 也生效。
+- **`ALLOWED_HOSTS` 上的網域名是唯一的例外,而它換一道更強的閘:必須帶 Access 注入的
+  `Cf-Access-Jwt-Assertion`。** 那條路只有 Cloudflare Tunnel + Access 進得來,所以「沒有
+  這顆標頭」就是「沒經過 Access」—— 政策被誤刪時原點自己 fail closed,而不是把 16 個
+  feed token 攤開。**只驗標頭在不在,沒驗簽章**:守的是設定錯誤,不是能自己組標頭的
+  攻擊者(要擋那個得抓 team domain 的 JWKS 驗 RS256)。**不准為了方便把這個 return
+  改成 `True`。**
+- **Origin 同時收 `http://` 與 `https://`** —— 內網直打是 http,經 tunnel 進來瀏覽器送
+  的是 https。比對的仍然是「Origin 的 host == Host」,不要退化成只比 host 字串。
 - **每條路徑都要呼叫 `_audit()`** —— 成功與每一道 guard 拒絕都要。刪除是硬刪、沒有備份,
   而 docker 的事件緩衝只留幾分鐘,這是事後唯一能回答「誰在什麼時候刪了什麼」的地方。
   `log_message` 把 GET 全靜音是刻意的(一次載入十幾個請求),但**破壞性動作不准跟著靜音**。

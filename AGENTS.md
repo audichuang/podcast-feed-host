@@ -16,9 +16,14 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 
 **新增任何 service,先回答兩題:掛 `:ro` 還是 `:rw`、綁 `0.0.0.0` 還是 LAN IP。** 答不出來就別加。
 
-- **8086 / 8087 絕不加進 Cloudflare Tunnel ingress。** uploader 是寫入端;dashboard 會把
-  **每一個 feed token 列出來**,而 token(`HMAC(salt, show_id)`、不輪替)就是那些未公開列出的
-  feed 唯一的存取控制。一次外洩等於永久公開。
+- **8086 絕不加進 Cloudflare Tunnel ingress。** uploader 是寫入端,沒有任何要對外的理由。
+- **8087 只准在 Cloudflare Access 後面對外。** dashboard 會把**每一個 feed token 列出來**,
+  而 token(`HMAC(salt, show_id)`、不輪替)就是那些未公開列出的 feed 唯一的存取控制 ——
+  一次外洩等於永久公開。所以那條 ingress 要成立必須**同時**有這三樣,少一樣就撤掉 ingress:
+  ①該 hostname 有 Access application + Allow 政策(email OTP);②dashboard 的
+  `ALLOWED_HOSTS` 只列那一個 hostname;③`_host_ok` 對白名單網域強制要 Access 的
+  `Cf-Access-Jwt-Assertion` 標頭(Access 被誤刪時原點自己 fail closed)。
+  **驗收就是打一次沒帶 cookie 的 `curl`,要看到 302 轉去 Access 登入頁**,不是看設定畫面。
 - **dashboard 的刪除能力 = `/srv` 的掛載模式**(`writable()` 就是 `os.access(ROOT, W_OK)`)。
   要緊急關掉全部破壞性動作:compose 改回 `:ro` + restart,不必動程式。
 
@@ -58,7 +63,7 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 
 ```bash
 python3 uploader/test_server.py     # 5 條
-python3 dashboard/test_server.py    # 29 條
+python3 dashboard/test_server.py    # 31 條
 ```
 
 兩支都只用標準函式庫、離線可跑、無 fixture。**改了任一支 `server.py` 就跑對應那支**,不要只

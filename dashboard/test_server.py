@@ -485,6 +485,47 @@ def test_host_must_be_an_ip_dns_rebinding():
             srv.shutdown()
 
 
+def test_tunnel_host_needs_access_jwt_and_accepts_https_origin():
+    """掛上 Cloudflare Tunnel 之後多出來的那條路:ALLOWED_HOSTS 上的網域名。
+    Access 會注入 Cf-Access-Jwt-Assertion,所以缺它就是沒經過 Access → 連 GET 都不給
+    (第一步就是撈 token)。而經 tunnel 進來的 Origin 是 https,POST 要收得下。"""
+    with tempfile.TemporaryDirectory() as root:
+        _fixture(root, extra_files=["EP01-99999999.mp3"])
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        p = srv.server_address[1]
+        d = os.path.join(root, "feeds", T)
+        H = "podcast-admin.example"
+        saved, server._ALLOWED_HOSTS = server._ALLOWED_HOSTS, {H}
+
+        def post(headers):
+            h = {"Content-Type": "application/json", "X-Confirm": "1"}
+            h.update(headers)
+            r = urllib.request.Request(f"http://127.0.0.1:{p}/api/delete-orphans",
+                                       method="POST",
+                                       data=json.dumps({"token": T}).encode(), headers=h)
+            try:
+                with urllib.request.urlopen(r, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+        try:
+            jwt = {"Host": H, "Cf-Access-Jwt-Assertion": "eyJhbGciOiJSUzI1NiJ9.x.y"}
+            assert _req(p, "/", {"Host": H})[0] == 403          # 沒經過 Access
+            assert _req(p, "/", jwt)[0] == 200
+            assert _req(p, "/", {"Host": "192.168.31.105"})[0] == 200   # 內網那條沒變
+            assert post({"Host": H, "Origin": f"https://{H}"})[0] == 403        # 缺 JWT
+            assert post(dict(jwt, Origin="https://evil.example"))[0] == 403     # 跨來源
+            assert os.path.exists(os.path.join(d, "EP01-99999999.mp3"))
+            code, j = post(dict(jwt, Origin=f"https://{H}"))                   # 遠端可刪
+            assert code == 200 and "1 個舊版檔" in j["msg"]
+            assert not os.path.exists(os.path.join(d, "EP01-99999999.mp3"))
+            assert os.path.exists(os.path.join(d, "EP01-bbbbbbbb.mp3"))
+        finally:
+            server._ALLOWED_HOSTS = saved
+            srv.shutdown()
+
+
 def test_files_newer_than_show_json_are_still_in_flight():
     """發布器順序是「全部媒體 → show.json → feed.xml」,所以 mtime 比 show.json 新
     = 這個檔還在飛。一季的重編碼上傳遠超 30 分鐘,單靠緩衝窗擋不住。"""

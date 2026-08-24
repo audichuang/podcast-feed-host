@@ -133,12 +133,35 @@ $FEEDS_ROOT_HOST/
 ```
 
 **⚠️ 這頁把每一個 feed token 列出來,而 token 就是那些未公開列出的 feed 的唯一存取
-控制。跟 uploader 同一條規則:只綁 NAS 的 LAN IP,絕不加進 Cloudflare Tunnel ingress。**
-Host 必須是 IP 字面值(擋 DNS rebinding),要用網域名得設 `ALLOWED_HOSTS`。
+控制。** 所以 port 只綁 NAS 的 LAN IP,而它要對外**只有一條合法路徑:Cloudflare Access
+後面的 tunnel hostname**(見下)。Host 必須是 IP 字面值(擋 DNS rebinding),要用網域名
+得設 `ALLOWED_HOSTS` —— 而白名單上的網域名額外強制要帶 Access 的 JWT 標頭。
+
+### 經 Cloudflare Tunnel + Access 對外
+
+三樣缺一不可,順序也別反(先 Access,再開白名單 —— 中間那段空窗原點是 403,不是敞開):
+
+1. **Access application**(Zero Trust → Access → Applications → Self-hosted):
+   domain = 該 hostname,政策 `Allow` + Include `Emails` = 你的信箱,登入方式
+   **One-time PIN**(email OTP,不需要接任何 IdP)。
+2. **Tunnel public hostname**:該 hostname → `http://<NAS LAN IP>:8087`(DNS 那筆
+   CNAME 指向 `<tunnel-id>.cfargotunnel.com`,proxied)。
+3. **`DASH_ALLOWED_HOSTS=<該 hostname>`** 寫進 dashboard 的環境變數並 restart。
+
+`_host_ok` 對白名單網域**強制要有 `Cf-Access-Jwt-Assertion`**(Access 注入的),所以
+政策被誤刪時原點自己 fail closed。刪除功能在外網也能用:Origin 檢查同時收 `http://`
+與 `https://`(經 tunnel 進來的是後者),比對的仍然是「Origin 的 host == Host」。
+
+驗收(不帶 cookie 應該看到 Access 的 302,而不是頁面):
+
+```bash
+curl -sI https://<hostname>/ | head -3          # 期待 302 → *.cloudflareaccess.com
+curl -s -o /dev/null -w '%{http_code}\n' https://<hostname>/healthz   # 302,連 /healthz 都被擋
+```
 
 實作是**單一 stdlib-only Python 檔**(`dashboard/server.py`),烤進 image,
 更新走 CI → GHCR → watchtower(跟 caddy 同一條路;`uploader` 是手動的,見上)。
-離線可測:`python3 dashboard/test_server.py`(30 個測試,無第三方相依)。
+離線可測:`python3 dashboard/test_server.py`(31 個測試,無第三方相依)。
 
 **每個破壞性動作都會寫一行稽核 log 到 container log**(時間、client IP、動作、body、結果),
 含每一道被擋下的 guard;GET 一律安靜。刪除是硬刪、沒有備份,而 docker 的事件緩衝只留幾分鐘 ——

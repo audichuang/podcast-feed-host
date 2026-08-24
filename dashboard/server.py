@@ -75,6 +75,7 @@ _HASHED = re.compile(r"-[0-9a-f]{8}\.")
 _TOKEN_RE = re.compile(r"^[a-z2-7]{2,64}$")
 _TRASH_ENTRY = re.compile(r"^\d{8}-\d{6}-[a-z2-7]{2,64}$")
 #: Host 白名單。預設只收 IP 字面值與 localhost —— 見 `Handler._host_ok`。
+#: 白名單裡的**網域名**額外要求 Cloudflare Access 的 JWT 標頭(同一個地方)。
 _ALLOWED_HOSTS = {h.strip() for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()}
 # 發布器把附件拼成 `<p>{emoji} <a href="…">{label}</a></p>` 附在 notes body 尾端
 # (notebooklm_mcp/publish/notes_html.py)。展開面板另外有按鈕,這裡剝掉避免重複。
@@ -1262,7 +1263,14 @@ class Handler(BaseHTTPRequestHandler):
         **對 GET 也生效** —— rebinding 的第一步是用 GET 把 16 個 feed token 撈走。
         """
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
-        if host in _ALLOWED_HOSTS or host == "localhost":
+        if host in _ALLOWED_HOSTS:
+            # 白名單上的網域名只有一條進來的路:Cloudflare Tunnel + Access。Access 會
+            # 注入這顆標頭,所以「沒有它」就是「這個請求沒經過 Access」—— 政策被誤刪
+            # 或設錯 host 時,原點自己 fail closed,而不是把 16 個 feed token 攤開。
+            # ponytail: 只檢查標頭在不在,沒驗簽章。守的是設定錯誤這個真實故障模式;
+            # 要擋「自己組一顆假標頭」的攻擊者,得抓 team domain 的 JWKS 驗 RS256。
+            return bool(self.headers.get("Cf-Access-Jwt-Assertion"))
+        if host == "localhost":
             return True
         try:
             ipaddress.ip_address(host)
@@ -1286,10 +1294,15 @@ class Handler(BaseHTTPRequestHandler):
         # CSRF:這頁沒有登入態,而 POST 可以刪檔。自訂標頭會逼出 CORS preflight,
         # 跨來源頁面送不出去;Origin 再比對一次。兩道都便宜。
         for bad, why in (
-            (not self._host_ok(), "Host 必須是 IP(見 ALLOWED_HOSTS)"),
+            (not self._host_ok(),
+             "Host 必須是 IP,或白名單網域帶 Access JWT(見 ALLOWED_HOSTS)"),
             (self.headers.get("X-Confirm") != "1", "缺少確認標頭"),
+            # 兩種 scheme 都收:內網直打是 http,經 tunnel 進來瀏覽器送的是 https。
+            # 比對的仍然是「Origin 的 host 必須等於 Host」,擋跨來源的那一刀沒有變鈍。
             (bool(self.headers.get("Origin"))
-             and self.headers.get("Origin") != f"http://{self.headers.get('Host', '')}",
+             and self.headers.get("Origin") not in (
+                 f"http://{self.headers.get('Host', '')}",
+                 f"https://{self.headers.get('Host', '')}"),
              "跨來源請求"),
             (not writable(), "/srv 是唯讀掛載,這台不開放刪除"),
         ):

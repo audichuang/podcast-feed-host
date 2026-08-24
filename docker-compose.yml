@@ -50,7 +50,7 @@ services:
       timeout: 5s
       retries: 3
 
-  dashboard:                   # ADMIN 管理後端 — LAN-only, never in the tunnel
+  dashboard:                   # ADMIN 管理後端 — LAN + Access-gated tunnel hostname
     image: ghcr.io/audichuang/podcast-feed-dashboard:latest
     restart: unless-stopped
     pull_policy: always
@@ -59,10 +59,17 @@ services:
       # are served by this container itself (it mounts /srv), so an unset or
       # wrong value degrades to a relative URL — it never breaks the page.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # Host allowlist. Empty = IP literals only (that is the DNS-rebinding guard).
+      # Put the tunnel hostname here to reach this page by name — and note that a
+      # hostname on this list ALSO requires Cloudflare Access's JWT header
+      # (`_host_ok` in server.py), so the origin fails closed if the Access policy
+      # is ever deleted or misconfigured. Leave empty to keep it LAN-IP-only.
+      ALLOWED_HOSTS: ${DASH_ALLOWED_HOSTS:-}
     ports:
-      # Same rule as the uploader: bind the NAS LAN IP ONLY. This page lists every
-      # feed token, and the token IS the access control for an unlisted feed —
-      # putting it behind the tunnel publishes all of them at once.
+      # Same rule as the uploader: bind the NAS LAN IP ONLY — the tunnel reaches
+      # this port from the LAN side. This page lists every feed token, and the
+      # token IS the access control for an unlisted feed, so the ONLY way it may
+      # appear in a tunnel ingress is behind a Cloudflare Access policy.
       - "${UPLOAD_BIND:?set UPLOAD_BIND to the NAS LAN IP in .env}:${DASH_PORT:-8087}:80"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
