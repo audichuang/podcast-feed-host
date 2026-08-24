@@ -163,6 +163,12 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<hostname>/healthz   # 302,連 
 更新走 CI → GHCR → watchtower(跟 caddy 同一條路;`uploader` 是手動的,見上)。
 離線可測:`python3 dashboard/test_server.py`(31 個測試,無第三方相依)。
 
+**怎麼確認 NAS 上跑的是哪一版程式?** 沒有版本端點,兩招都不會改到任何東西:打一次
+`curl -s -X POST -H 'Host: evil.example' http://<NAS的LAN IP>:8087/api/delete-orphans`,看回傳的
+guard 訊息是不是這一版的字串(它只會寫一行稽核 log,不碰檔案);要更硬就把首頁的 inline
+`<style>`/`<script>` 抓下來,跟 `server.py` 的 `_CSS`/`_JS` 逐位元組比 hash —— 一致就是這份
+code 烤出來的 image 在跑。
+
 **每個破壞性動作都會寫一行稽核 log 到 container log**(時間、client IP、動作、body、結果),
 含每一道被擋下的 guard;GET 一律安靜。刪除是硬刪、沒有備份,而 docker 的事件緩衝只留幾分鐘 ——
 `docker logs podcast-feed-host-dashboard-1 | grep AUDIT` 是事後唯一能回答「誰刪了什麼」的地方。

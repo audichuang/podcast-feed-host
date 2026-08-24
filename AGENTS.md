@@ -23,7 +23,9 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
   ①該 hostname 有 Access application + Allow 政策(email OTP);②dashboard 的
   `ALLOWED_HOSTS` 只列那一個 hostname;③`_host_ok` 對白名單網域強制要 Access 的
   `Cf-Access-Jwt-Assertion` 標頭(Access 被誤刪時原點自己 fail closed)。
-  **驗收就是打一次沒帶 cookie 的 `curl`,要看到 302 轉去 Access 登入頁**,不是看設定畫面。
+  **驗收看的是行為**:未登入打進去要被 Access 轉走(指令見 README),不是看設定畫面對不對。
+  要緊急斷掉對外:**清空容器的 `ALLOWED_HOSTS` 再 restart** —— 原點退回只收 IP 字面值,
+  Cloudflare 那邊完全不用動(跟下面 `:ro` 關掉刪除同一種槓桿)。
 - **dashboard 的刪除能力 = `/srv` 的掛載模式**(`writable()` 就是 `os.access(ROOT, W_OK)`)。
   要緊急關掉全部破壞性動作:compose 改回 `:ro` + restart,不必動程式。
 
@@ -46,6 +48,16 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
   repo 這份推理生產環境。改任一邊都要同步另一邊。
 - 未收斂項:讓 NAS 直接用 repo 的檔 + 一份 `.env`。那需要重建整個 stack(公開讀取短暫中斷),
   還沒做。
+- **NAS 的 compose project 名是 `podcast-feed-host`,目錄卻叫 `podcast`。** compose 指令一律帶
+  `-p podcast-feed-host --project-directory /volume5/docker/podcast` —— 不帶會照目錄名另外長出
+  一整套平行容器,舊的還在跑、port 撞在一起。
+- **對外那條 tunnel 是 remote-managed(`tunnel run --token`):ingress 在 Cloudflare 端,NAS 上
+  沒有 `config.yml` 可改,加 hostname 也不用重啟 cloudflared。** 帳號上四顆 tunnel 只有
+  `audinas` 連得到這台(其餘的 origin 是別台機器);而
+  `PUT …/cfd_tunnel/<id>/configurations` **是整份覆蓋** —— 先 GET 存一份再改,少貼一條就把
+  `podcast.audichuang.app` 那條跟其他七條一起抹掉。
+- **改 dashboard 的環境變數要 `compose up -d --no-deps dashboard`,等 watchtower 沒有用** ——
+  它只把 image 換新,不會套用 compose 的新設定。
 - **`Caddyfile` 生效的是掛載那份**(`compose` 的 `./Caddyfile:/etc/caddy/Caddyfile:ro`);
   image 裡也 `COPY` 了一份當預設。改 Caddyfile → 同步到 NAS + `restart caddy`,不必等 CI。
   兩份保持一致。
