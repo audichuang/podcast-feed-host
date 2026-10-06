@@ -38,9 +38,9 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 
 ## NAS 上的部署(2026-10-06 起由 Komodo 管)
 
-- **audinas 上這個 stack 由 Komodo 部署,正本在 ops repo**(`~/Project/hindsight-ops`,Gitea
-  `audichuang/hindsight-ops`)的 `hosts/audinas/podcast-feed-host/`:`compose.yaml`、
-  `Caddyfile`、`manifest.md`。交接紀錄 `operator/podcast-komodo-2026-10-06.md`。
+- **audinas 上這個 stack 由 Komodo 部署,正本在 ops repo**(`~/Project/nas-ops`,Gitea
+  `audichuang/nas-ops`)的 `hosts/audinas/podcast-feed-host/`:`compose.yaml`、
+  `Caddyfile`、`manifest.md`。交接紀錄 `operator/komodo/podcast-komodo-2026-10-06.md`。
   **改 repo 這份 `docker-compose.yml` 不會生效**,它是給別人照 `.env` 用的範本。
 - **不變式:兩份的 service / 掛載 / port 結構必須一致。** 值本來就不同(範本走 `.env`、ops 那份
   內嵌),但「有哪些 service、各自掛什麼、綁哪個介面」不准分歧。改任一邊都要同步另一邊。
