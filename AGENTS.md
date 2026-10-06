@@ -34,42 +34,34 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 - caddy 斷 → 訂閱者抓不到;uploader 斷 → **正在跑的那一季發布會壞掉**。
 - **動它們之前先確認沒有發布在跑**:比對每個 feed 的 `feed.xml` mtime 與該目錄最新媒體檔的
   mtime,有檔案比 `feed.xml` 新就是還在飛。(發布器的順序是「全部媒體 → show.json → feed.xml」。)
-- **改 `compose.yaml` 這個動作本身可能讓 DSM Container Manager 重新套用整個專案。**
-  2026-08-23 實際觀察到 uploader 在一次 compose 編輯後重啟(docker 事件緩衝已滾掉、未能證實
-  元兇,`RestartCount=0` + `/proc/1/stat` 證實行程真的換過)。所以**改 compose 挑沒有發布在跑的時候**。
+- 部署會重建哪個容器就中斷哪個,uploader 尤其要挑沒有發布在跑的時候(見下一節)。
 
-## NAS 上的部署與同步不變式
+## NAS 上的部署(2026-10-06 起由 Komodo 管)
 
-- NAS 跑的是 `/volume5/docker/podcast/compose.yaml` —— 它是 repo 這份 `docker-compose.yml` 的
-  「值已內嵌」版本(port、絕對路徑、`UPLOAD_TOKEN` 都寫死,沒有 `.env`)。
-  **改 repo 這份不會生效**,反之亦然。
-- **不變式:兩份的 service / 掛載 / port 結構必須一致。** 值本來就每台不同(走各自的 `.env`
-  或內嵌),但「有哪些 service、各自掛什麼、綁哪個介面」不准分歧 —— 一旦分歧,下一個人會照
-  repo 這份推理生產環境。改任一邊都要同步另一邊。
-- 未收斂項:讓 NAS 直接用 repo 的檔 + 一份 `.env`。那需要重建整個 stack(公開讀取短暫中斷),
-  還沒做。
-- **NAS 的 compose project 名是 `podcast-feed-host`,目錄卻叫 `podcast`。** compose 指令一律帶
-  `-p podcast-feed-host --project-directory /volume5/docker/podcast` —— 不帶會照目錄名另外長出
-  一整套平行容器,舊的還在跑、port 撞在一起。
+- **audinas 上這個 stack 由 Komodo 部署,正本在 ops repo**(`~/Project/hindsight-ops`,Gitea
+  `audichuang/hindsight-ops`)的 `hosts/audinas/podcast-feed-host/`:`compose.yaml`、
+  `Caddyfile`、`manifest.md`。交接紀錄 `operator/podcast-komodo-2026-10-06.md`。
+  **改 repo 這份 `docker-compose.yml` 不會生效**,它是給別人照 `.env` 用的範本。
+- **不變式:兩份的 service / 掛載 / port 結構必須一致。** 值本來就不同(範本走 `.env`、ops 那份
+  內嵌),但「有哪些 service、各自掛什麼、綁哪個介面」不准分歧。改任一邊都要同步另一邊。
+  唯一刻意的差別:ops 那份**沒有 watchtower**,image 一律 `sha-<commit>@sha256:<digest>` 釘住。
+- **改設定或換 image = 改 ops repo → commit → 在 Komodo 鎖定該 SHA → DeployStack。**
+  不用 SSH `compose up`、不用 Container Manager(CM 專案已刪;`/volume5/docker/podcast` 只剩
+  回滾副本與資料,放了 `MANAGED-BY-KOMODO`)。流程細節走 `nas-container` skill 的 Komodo 參考檔。
+- **更新 image 沒有自動化。** CI 照樣每次 push 建三個 image 推 GHCR(`latest` + `sha-<short>`),
+  但沒有東西會自己拉。要上線:取 CI 推的 `sha-<short>` tag 的 digest,改 ops repo 的 `image:`。
+  **uploader 只在沒有發布在跑時更新**,部署時 `services` 只列要換的那個。
+- `UPLOAD_TOKEN` 在 audinas Periphery `[secrets]`(`PODCAST_UPLOAD_TOKEN`),不在任何檔案裡。
+- **`Caddyfile` 生效的是掛載那份**(ops repo 的 `Caddyfile`,從 Komodo clone 唯讀掛進 caddy);
+  image 裡也 `COPY` 了一份當預設,兩份保持一致。單檔 bind 綁的是容器啟動時的 inode,只改
+  Caddyfile 的部署之後要 restart caddy。
+- **三個 image 都由 CI 建、NAS 只 pull。** 沒有本機 build、沒有 bind-mount 程式碼。
+  `dashboard/server.py` 是烤進 image 的 —— **改了程式要 push 讓 CI 建**,再照上面換 digest。
 - **對外那條 tunnel 是 remote-managed(`tunnel run --token`):ingress 在 Cloudflare 端,NAS 上
   沒有 `config.yml` 可改,加 hostname 也不用重啟 cloudflared。** 帳號上四顆 tunnel 只有
   `audinas` 連得到這台(其餘的 origin 是別台機器);而
   `PUT …/cfd_tunnel/<id>/configurations` **是整份覆蓋** —— 先 GET 存一份再改,少貼一條就把
-  `podcast.audichuang.app` 那條跟其他七條一起抹掉。
-- **改 dashboard 的環境變數要 `compose up -d --no-deps dashboard`,等 watchtower 沒有用** ——
-  它只把 image 換新,不會套用 compose 的新設定。
-- **`Caddyfile` 生效的是掛載那份**(`compose` 的 `./Caddyfile:/etc/caddy/Caddyfile:ro`);
-  image 裡也 `COPY` 了一份當預設。改 Caddyfile → 同步到 NAS + `restart caddy`,不必等 CI。
-  兩份保持一致。
-- **三個 image 都由 CI 建、NAS 只 pull。** 沒有本機 build、沒有 bind-mount 程式碼。
-  `dashboard/server.py` 是烤進 image 的 —— **改了程式要 push 讓 CI 建**,在 NAS 上覆蓋
-  檔案不會生效(也不該掛進去:一份過期的本機檔會靜默蓋掉 CI 建出來的版本)。
-- **但只有 caddy 與 dashboard 貼 watchtower label,uploader 刻意沒貼。** CI matrix 每次
-  push 都重建三個 image,而 metadata 帶 commit SHA → digest 一定不同 → 貼了 label 的服務
-  會被無人值守地重建。caddy 重建是一秒的讀取空窗、dashboard 只有你在看,都無所謂;
-  **uploader 在發布中途被重建就是那一季壞掉**,而它可能因為一個跟它無關的改動被重建。
-  更新 uploader 是手動的:`compose pull uploader && up -d --no-deps uploader`,挑沒有發布
-  在跑的時候。(這就是上面那條「動它之前先確認沒有發布在跑」的必然結論。)
+  `podcast.audichuang.app` 那條跟其他七條一起抹掉。cloudflared 本身也是 Komodo stack `cloudflare`。
 
 ## 改完必跑
 
@@ -83,8 +75,7 @@ python3 dashboard/test_server.py    # 31 條
 
 ## 權限邊界
 
-- **使用者點名任務即授權該任務所需的部署**(例:「加一個 dashboard」含建容器)。但必須:
-  ①先 `cp -a` 備份 NAS 的 `compose.yaml`;②`up -d --no-deps <指名的 service>`,
-  **不加 `--remove-orphans`**;③事後回報影響半徑與回滾路徑,並貼出既有容器 ID 未變的證據。
+- **使用者點名任務即授權該任務所需的部署**(例:「加一個 dashboard」含建容器),照上面的
+  Komodo 流程做;事後回報影響半徑與回滾路徑,並貼出非目標容器 ID 未變的證據。
 - 沒被點名的服務、`git commit`/`push`、改發布身分或 tunnel 設定 —— 一律先問。
-- NAS 上的操作分層(看／彈／改／炸)與 sudo 範圍走 `synology-container` skill,本檔不重複。
+- NAS 上的操作分層(看／彈／改／炸)走 `nas-container` skill,本檔不重複。

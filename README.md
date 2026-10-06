@@ -51,6 +51,9 @@ pull + 重啟(只動貼了 `watchtower.enable` label 的 **caddy / dashboard**,�
 一次,所以自動更新是靠 watchtower。想改手動就把 watchtower 服務刪掉,自己
 `docker compose pull && docker compose up -d`。
 
+> 作者自己的部署(audinas)走的是後者的變體:沒有 watchtower,image 以 digest 釘住,
+> 由 Komodo 從另一個 ops repo 部署。細節見 [AGENTS.md](AGENTS.md)。
+
 ## 接上你既有的 Cloudflare Tunnel
 
 在你現有的 tunnel 加一條 ingress,指到這台機器的 `${HOST_PORT}`。依你 tunnel 的管理
