@@ -81,6 +81,25 @@ services:
       # every destructive action (buttons stop rendering, endpoints return 403).
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv:rw
 
+  r2-backup:                   # BACKUP — only with the Cloudflare R2 + Worker front (worker/)
+    # Daily: copy R2 into the feeds dir (never deletes here), re-upload episodes listeners
+    # pulled from this NAS, trim R2 under CAP_BYTES. Talks only to the Worker's token-gated
+    # admin API with UPLOAD_TOKEN, so no R2 key. Opt-in: `docker compose --profile r2 up -d`.
+    profiles: ["r2"]
+    image: curlimages/curl:8.22.0
+    restart: unless-stopped
+    user: "0:0"                # same file ownership as the uploader
+    init: true
+    entrypoint: ["sh", "/r2-backup.sh", "loop"]
+    environment:
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN:?set UPLOAD_TOKEN in .env}
+      BASE: ${R2_FRONT_URL:-https://podcast.example.com}  # the Worker's public URL
+      BACKUP_AT_UTC: "20:30"
+      DEST: /data
+    volumes:
+      - ./backup/r2-backup.sh:/r2-backup.sh:ro
+      - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/data   # rw: writes the backup; no ports
+
   watchtower:                  # AUTO-UPDATE — polls GHCR, restarts on new image
     image: containrrr/watchtower
     restart: unless-stopped

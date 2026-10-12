@@ -6,13 +6,19 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 
 ## 核心不變式:讀寫分離
 
-三個 service 掛**同一個** feed 目錄,靠掛載模式與綁定介面分權,不靠自律:
+四個 service 掛**同一個** feed 目錄,靠掛載模式與綁定介面分權,不靠自律:
 
 | service | 掛載 | 綁定 | 角色 |
 |---|---|---|---|
-| caddy | `:ro` | host port,經 tunnel 對外 | 訂閱者實際抓 feed 的那一個 |
-| uploader | rw(無後綴=預設) | **LAN IP only**,token 保護 | 發布器唯一的寫入口 |
+| caddy | `:ro` | host port,經 tunnel(`podcast-nas`)對外 | R2 沒有的檔由 Worker 回源到它 |
+| uploader | rw(無後綴=預設) | **LAN IP only**,token 保護 | 舊的發布寫入口(2026-10-12 起發布改走 Worker,保留當回滾) |
 | dashboard | `:rw` | **LAN IP only**,無登入 | 管理後端(刪除功能由掛載決定,見下) |
+| r2-backup | rw(寫備份) | 無 port | 每日把 R2 備份進來、補回被聽的舊集、修剪 R2(見 `worker/README.md`) |
+
+**2026-10-12 起 `podcast.audichuang.app` 是 Cloudflare Worker**(`worker/`):R2 為主,R2 沒有才經
+`podcast-nas.audichuang.app` 回到這台 caddy。發布器的 `PODCAST_UPLOAD_URL` 已改成 Worker,
+**uploader 不再收到發布**(保留當回滾路徑)。dashboard 看的是 NAS 備份,新集要等隔天備份才出現;
+在 dashboard 刪檔不會從 R2 刪,隔天又會被備份拉回來。
 
 **新增任何 service,先回答兩題:掛 `:ro` 還是 `:rw`、綁 `0.0.0.0` 還是 LAN IP。** 答不出來就別加。
 

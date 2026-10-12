@@ -14,9 +14,9 @@ function fakeBucket(files: Record<string, Uint8Array>) {
     async head(k: string) {
       return files[k] ? meta(k) : null;
     },
-    async get(k: string, opts: { range: Headers }) {
+    async get(k: string, opts?: { range: Headers }) {
       if (!files[k]) return null;
-      const m = /bytes=(\d+)-(\d*)/.exec(opts.range.get("Range") ?? "");
+      const m = /bytes=(\d+)-(\d*)/.exec(opts?.range.get("Range") ?? "");
       const data = files[k];
       if (!m) return { ...meta(k), body: new Blob([data]).stream() };
       const start = Number(m[1]);
@@ -26,6 +26,17 @@ function fakeBucket(files: Record<string, Uint8Array>) {
         range: { offset: start, length: end - start + 1 },
         body: new Blob([data.slice(start, end + 1)]).stream(),
       };
+    },
+    async list() {
+      const objects = Object.keys(files).map((key) => ({
+        key,
+        size: files[key].length,
+        uploaded: new Date("2026-01-01T00:00:00Z"),
+      }));
+      return { objects, truncated: false };
+    },
+    async delete(k: string) {
+      delete files[k];
     },
     async put(k: string, body: ReadableStream) {
       files[k] = new Uint8Array(await new Response(body).arrayBuffer());
@@ -38,9 +49,13 @@ function env(files: Record<string, Uint8Array> = {}) {
 }
 
 let nasCalls: string[] = [];
+let nasBodyBytes = 8;
 globalThis.fetch = (async (url: string) => {
   nasCalls.push(url);
-  return new Response("from-nas", { status: 200 });
+  return new Response("from-nas", {
+    status: 200,
+    headers: { "Content-Length": String(nasBodyBytes) },
+  });
 }) as typeof fetch;
 
 let pending: Promise<unknown>[] = [];
@@ -116,13 +131,50 @@ test("healthz precheck: marker + 200 with right token, 401 with wrong", async ()
   assert.equal(bad.status, 401);
 });
 
-test("NAS hit on episode media leaves a promote marker; R2 hit and feed.xml don't", async () => {
+test("only a real listen (GET, >= 1 MB from NAS) leaves a promote marker", async () => {
   const e = env({ [`feeds/${TOK}/EP02-0123abcd.mp3`]: new Uint8Array([1]) });
   pending = [];
-  await call(e, MP3); // miss -> NAS
+  nasBodyBytes = 2; // crawler probe: bytes=0-1
+  await call(e, MP3, { headers: { Range: "bytes=0-1" } });
+  nasBodyBytes = 5_000_000;
+  await call(e, MP3, { method: "HEAD" }); // HEAD never counts
+  await Promise.all(pending);
+  assert.deepEqual(Object.keys(e.BUCKET.files).filter((k) => k.startsWith("_promote/")), []);
+  await call(e, MP3); // real listen -> NAS
   await call(e, `/feeds/${TOK}/EP02-0123abcd.mp3`); // R2 hit
   await call(e, `/feeds/${TOK}/feed.xml`); // miss, but not evictable media
   await Promise.all(pending);
   const markers = Object.keys(e.BUCKET.files).filter((k) => k.startsWith("_promote/"));
   assert.deepEqual(markers, [`_promote${MP3}`]);
+  nasBodyBytes = 8;
+});
+
+test("admin API: token required; list, read show.json, delete", async () => {
+  const showKey = `feeds/${TOK}/show.json`;
+  const e = env({ [showKey]: new TextEncoder().encode("{}"), [MP3.slice(1)]: new Uint8Array(3) });
+  const auth = { Authorization: "Bearer s3cret" };
+  assert.equal((await call(e, "/_admin/list")).status, 401);
+  assert.equal((await call(e, `/_admin/object/${showKey}`)).status, 401);
+  const list = await (await call(e, "/_admin/list", { headers: auth })).text();
+  assert.equal(list, `2026-01-01T00:00:00.000Z|2|${showKey}\n2026-01-01T00:00:00.000Z|3${MP3.replace("/", "|")}\n`);
+  assert.equal(await (await call(e, `/_admin/object/${showKey}`, { headers: auth })).text(), "{}");
+  assert.equal((await call(e, `/feeds/${TOK}/show.json`)).status, 403); // public side still denied
+  const del = await call(e, `/_admin/object${MP3}`, { method: "DELETE", headers: auth });
+  assert.equal(del.status, 204);
+  assert.deepEqual(Object.keys(e.BUCKET.files), [showKey]);
+  assert.equal((await call(e, `/_admin/object${MP3}`, { method: "DELETE" })).status, 401);
+});
+
+test("publisher can PUT show.json even though reading it is 403", async () => {
+  const e = env();
+  const showPath = `/feeds/${TOK}/show.json`;
+  const put = await call(e, showPath, {
+    method: "PUT",
+    body: "{}",
+    headers: { Authorization: "Bearer s3cret", "Content-Length": "2" },
+  });
+  assert.equal(put.status, 201);
+  assert.equal((await call(e, showPath)).status, 403);
+  const anon = await call(e, showPath, { method: "PUT", body: "{}", headers: { "Content-Length": "2" } });
+  assert.equal(anon.status, 401);
 });

@@ -1,17 +1,23 @@
 #!/bin/sh
-# Daily on the NAS, R2 as a cache in front of the NAS backup:
-#   1. back up R2 -> NAS
-#   2. promote: episodes someone played from the NAS (Worker left _promote/<path>
-#      markers) are copied back into R2, which makes them the newest objects
+# Daily on the NAS, R2 as a cache in front of the NAS backup. Everything goes through the
+# Worker's token-gated admin API, so the only credential is the existing upload token.
+#   1. back up: fetch every R2 object the NAS lacks (episode media by size; small files
+#      such as feed.xml / index.html / show.json are re-fetched every run, they change)
+#   2. promote: episodes someone played from the NAS (_promote/<path> markers left by the
+#      Worker) are re-uploaded, which makes them the newest objects
 #   3. evict: trim R2 under CAP_BYTES, oldest upload first, only what the NAS holds
+#
+# Usage: r2-backup.sh [once|loop]   (loop = run daily at BACKUP_AT, container entrypoint)
 set -eu
 
-REMOTE=${REMOTE:-r2:podcast-feeds}
+BASE=${BASE:-https://podcast.audichuang.app}
 DEST=${DEST:-/data}
 CAP_BYTES=${CAP_BYTES:-7000000000} # 70% of the 10 GB R2 free tier
 
 # Only episode media is evictable; feed.xml / index.html / artwork always stay in R2.
 MEDIA_RE='\|feeds/[a-z2-7]{24}/EP[0-9]{2}-[0-9a-f]{8}\.(mp3|pdf|html)$'
+# Keys come off the network: only ever write inside DEST/feeds/<token>/<plain name>.
+KEY_RE='^feeds/[a-z2-7]{24}/[A-Za-z0-9][A-Za-z0-9._-]*$'
 
 # pick_evictions <listing "time|size|path"> <backup dir> <cap bytes>
 # Prints paths to delete, oldest first, until the total fits under the cap.
@@ -26,29 +32,82 @@ pick_evictions() {
   done
 }
 
-main() {
-  work=$(mktemp -d)
-  trap 'rm -rf "$work"' EXIT
-  # copy, never sync: deletions in R2 must not propagate to the backup.
-  rclone copy "$REMOTE" "$DEST" --exclude "_promote/**"
-
-  rclone lsf -R --files-only "$REMOTE/_promote" >"$work/promote" 2>/dev/null || :
-  while read -r path; do
-    # rcat (stream), not copyto: copyto carries the file's old mtime along, so the
-    # promoted episode would sort as oldest and be evicted in step 3. rcat stamps "now".
-    [ -f "$DEST/$path" ] && rclone rcat "$REMOTE/$path" <"$DEST/$path"
-    rclone deletefile "$REMOTE/_promote/$path"
-  done <"$work/promote"
-
-  # --use-server-modtime = upload time. Without it rclone reports the file's original
-  # mtime, so a just-promoted old episode would look oldest and be evicted at once.
-  rclone lsf -R --files-only --use-server-modtime --format tsp --separator '|' \
-    --exclude "_promote/**" "$REMOTE" >"$work/listing"
-  pick_evictions "$work/listing" "$DEST" "$CAP_BYTES" >"$work/evict"
-  if [ -s "$work/evict" ]; then
-    echo "evicting $(wc -l <"$work/evict") objects from $REMOTE"
-    rclone delete "$REMOTE" --files-from "$work/evict"
-  fi
+api() {
+  curl -fsS --retry 3 --retry-all-errors --max-time 900 \
+    -H "Authorization: Bearer $UPLOAD_TOKEN" "$@"
 }
 
-[ "${R2_BACKUP_LIB:-}" = 1 ] || main
+backup() { # $1 listing
+  grep -v '|_promote/' "$1" | while IFS='|' read -r _time size key; do
+    if ! echo "$key" | grep -qE "$KEY_RE"; then
+      echo "skip unexpected key: $key" >&2
+      continue
+    fi
+    dst=$DEST/$key
+    if echo "|$key" | grep -qE "$MEDIA_RE" && [ "$(stat -c%s "$dst" 2>/dev/null)" = "$size" ]; then
+      continue # content-addressed: same name + size = same bytes
+    fi
+    mkdir -p "${dst%/*}"
+    api -o "$dst.part" "$BASE/_admin/object/$key"
+    if [ "$(stat -c%s "$dst.part")" != "$size" ]; then
+      rm -f "$dst.part"
+      echo "size mismatch: $key" >&2
+      return 1
+    fi
+    mv -f "$dst.part" "$dst"
+  done
+}
+
+promote() { # $1 listing
+  grep '|_promote/' "$1" | while IFS='|' read -r _time _size key; do
+    path=${key#_promote/}
+    if echo "$path" | grep -qE "$KEY_RE" && [ -f "$DEST/$path" ]; then
+      code=$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --max-time 900 -X PUT \
+        -H "Authorization: Bearer $UPLOAD_TOKEN" -T "$DEST/$path" "$BASE/$path")
+      # 413 = over the Worker's 100 MB body limit (old 256k uploads): stays NAS-only.
+      case $code in
+        201 | 413) ;;
+        *)
+          echo "promote $path -> HTTP $code, marker kept for next run" >&2
+          continue
+          ;;
+      esac
+    fi
+    api -X DELETE "$BASE/_admin/object/$key" >/dev/null
+  done
+}
+
+main() {
+  : "${UPLOAD_TOKEN:?}"
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  api "$BASE/_admin/list" >"$work/listing"
+  backup "$work/listing"
+  promote "$work/listing"
+  api "$BASE/_admin/list" >"$work/listing" # promotion changed upload times
+  pick_evictions "$work/listing" "$DEST" "$CAP_BYTES" >"$work/evict"
+  while read -r key; do
+    api -X DELETE "$BASE/_admin/object/$key" >/dev/null
+  done <"$work/evict"
+  echo "$(date -u +%FT%TZ) ok: $(wc -l <"$work/listing") objects in R2, evicted $(wc -l <"$work/evict")"
+}
+
+if [ "${R2_BACKUP_LIB:-}" != 1 ]; then
+  case "${1:-once}" in
+    once) main ;;
+    loop)
+      # Each run is its own process: `main || ...` would switch off set -e inside main,
+      # and a failed backup must never fall through to eviction.
+      while :; do
+        if [ "$(date -u +%H:%M)" = "${BACKUP_AT_UTC:-20:30}" ]; then
+          sh "$0" once || echo "$(date -u +%FT%TZ) FAILED" >&2
+        fi
+        sleep 60
+      done
+      ;;
+    *)
+      echo "usage: $0 [once|loop]" >&2
+      exit 2
+      ;;
+  esac
+fi

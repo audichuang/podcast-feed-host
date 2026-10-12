@@ -23,7 +23,12 @@ const MEDIA_RE = new RegExp(`^/feeds/${TOKEN}/EP\\d{2}-[0-9a-f]{8}\\.(?:mp3|pdf|
 // ponytail: Worker request body limit is 100 MB on this zone plan. At 96k mono that is
 // ~2.3 h of audio; a longer episode needs presigned R2 uploads instead.
 const MAX_BYTES = 100 * 1024 * 1024;
-const NAS_HEADER_TIMEOUT_MS = 10_000;
+// Generous: a busy NAS or a waking HDD measured up to ~19 s for a request (scan, 2026-10-12).
+const NAS_HEADER_TIMEOUT_MS = 30_000;
+// A NAS hit counts as "someone is listening" only when it actually ships audio. Podcast
+// crawlers validate enclosures with HEAD or tiny ranges (bytes=0-1); counting those would
+// mark every old episode daily and thrash the cache. 1 MB ≈ 1.5 min at 96k mono.
+const PROMOTE_MIN_BYTES = 1_000_000;
 
 const MARKER = { "X-Podcast-Uploader": "1" };
 
@@ -130,6 +135,37 @@ async function fromNas(req: Request, env: Env, path: string): Promise<Response> 
   }
 }
 
+// Admin API for the NAS backup job (backup/r2-backup.sh), same bearer token as uploads:
+//   GET    /_admin/list          -> "uploaded|size|key" per line, oldest-first sortable
+//   GET    /_admin/object/<key>  -> raw object (incl. show.json, which the public side 403s)
+//   DELETE /_admin/object/<key>  -> 204
+// The token can already overwrite every feed, so delete adds no new destructive power.
+async function handleAdmin(req: Request, env: Env, path: string): Promise<Response> {
+  if (!(await tokenOk(req.headers.get("Authorization"), env.UPLOAD_TOKEN))) return reply(401);
+  if (path === "/_admin/list" && req.method === "GET") {
+    const lines: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await env.BUCKET.list({ cursor, limit: 1000 });
+      for (const o of page.objects) lines.push(`${o.uploaded.toISOString()}|${o.size}|${o.key}`);
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+    return new Response(lines.join("\n") + (lines.length ? "\n" : ""), { headers: MARKER });
+  }
+  const key = path.startsWith("/_admin/object/") ? path.slice("/_admin/object/".length) : "";
+  if (!key) return reply(404);
+  if (req.method === "GET") {
+    const obj = await env.BUCKET.get(key);
+    if (!obj) return reply(404);
+    return new Response(obj.body, { headers: { ...MARKER, "Content-Length": String(obj.size) } });
+  }
+  if (req.method === "DELETE") {
+    await env.BUCKET.delete(key);
+    return reply(204);
+  }
+  return reply(405);
+}
+
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const path = new URL(req.url).pathname;
@@ -142,12 +178,15 @@ export default {
       }
       return reply(200, "ok\n");
     }
+    if (path.startsWith("/_admin/")) return handleAdmin(req, env, path);
+    // Writes are token + allowlist gated on their own; the read deny rules below must not
+    // apply to them (the publisher PUTs show.json on every publish).
+    if (req.method === "PUT") return handlePut(req, env, path);
+    if (req.method !== "GET" && req.method !== "HEAD") return new Response(null, { status: 405 });
+
     if (SHOW_JSON_RE.test(path)) return new Response(null, { status: 403 });
     if (path.startsWith("/_trash/") || path.startsWith("/_promote/"))
       return new Response(null, { status: 404 });
-
-    if (req.method === "PUT") return handlePut(req, env, path);
-    if (req.method !== "GET" && req.method !== "HEAD") return new Response(null, { status: 405 });
 
     // Fall back to the NAS only on "not in R2"; real R2 errors surface as 500.
     let r2: Response | null;
@@ -160,7 +199,8 @@ export default {
     }
     if (r2) return r2;
     const nas = await fromNas(req, env, path);
-    if (nas.ok && MEDIA_RE.test(path)) {
+    const shipped = Number(nas.headers.get("Content-Length") ?? 0);
+    if (req.method === "GET" && nas.ok && shipped >= PROMOTE_MIN_BYTES && MEDIA_RE.test(path)) {
       // Empty marker object; idempotent, so repeated plays cost one write each.
       ctx.waitUntil(env.BUCKET.put(`_promote${path}`, ""));
     }
