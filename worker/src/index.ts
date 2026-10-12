@@ -114,7 +114,9 @@ function conditionals(h: Headers): Headers {
   }
   for (const k of ["If-Modified-Since", "If-Unmodified-Since"]) {
     const v = h.get(k);
-    if (v && !Number.isNaN(Date.parse(v))) out.set(k, v);
+    const t = v ? Date.parse(v) : Number.NaN;
+    // R2 throws on dates outside roughly 1678-2262 (e.g. .NET's "31 Dec 9999" sentinel).
+    if (v && t >= 0 && t < Date.UTC(2200, 0, 1)) out.set(k, v);
   }
   return out;
 }
@@ -226,7 +228,8 @@ async function fromNas(req: Request, env: Env, path: string): Promise<Response> 
 }
 
 // Admin API for the NAS backup job (backup/r2-backup.sh), same bearer token as uploads:
-//   GET    /_admin/list          -> "uploadedISO|size|key|uploadedEpoch" per line, sortable
+//   GET    /_admin/list          -> "uploadedISO|size|uploadedEpoch|key" per line, sortable;
+//                                    key last, so a "|" inside a key cannot shift the fields
 //   GET    /_admin/object/<key>  -> raw object (incl. show.json, which the public side 403s)
 //   DELETE /_admin/object/<key>  -> 204
 // The token can already overwrite every feed, so delete adds no new destructive power.
@@ -239,7 +242,7 @@ async function handleAdmin(req: Request, env: Env, path: string): Promise<Respon
       // oxlint-disable-next-line no-await-in-loop -- each page needs the previous page's cursor
       const page = await env.BUCKET.list({ cursor, limit: 1000 });
       for (const o of page.objects) {
-        lines.push(`${o.uploaded.toISOString()}|${o.size}|${o.key}|${seconds(o.uploaded)}`);
+        lines.push(`${o.uploaded.toISOString()}|${o.size}|${seconds(o.uploaded)}|${o.key}`);
       }
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor);

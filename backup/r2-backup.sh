@@ -4,7 +4,8 @@
 #   1. back up: fetch every R2 object the NAS lacks or holds in another version. Files keep
 #      the R2 upload time as mtime (curl -R), so "same size + same mtime" = same object and
 #      the NAS keeps the publisher's write order (media -> show.json -> feed.xml), which the
-#      dashboard's health checks read
+#      dashboard's health checks read. Episode media is the exception: its name carries a
+#      content hash, so same name + same size is enough and its NAS mtime is left alone
 #   2. promote: episodes someone played from the NAS (_promote/<path> markers left by the
 #      Worker) are re-uploaded, which makes them the newest objects
 #   3. evict: trim R2 under CAP_BYTES, oldest upload first, only what the NAS holds
@@ -24,11 +25,13 @@ MEDIA_RE='\|feeds/[a-z2-7]{24}/EP[0-9]{2}-[0-9a-f]{8}\.(mp3|pdf|html)$'
 # Keys come off the network: only ever write inside DEST/feeds/<token>/<plain name>.
 KEY_RE='^feeds/[a-z2-7]{24}/[A-Za-z0-9][A-Za-z0-9._-]*$'
 
-# pick_evictions <listing "time|size|path[|epoch]"> <backup dir> <cap bytes>
+# Listing lines from GET /_admin/list: "uploadedISO|size|uploadedEpoch|key" (key last, so a
+# "|" inside a key stays in the key).
+# pick_evictions <listing> <backup dir> <cap bytes>
 # Prints paths to delete, oldest first, until the total fits under the cap.
 pick_evictions() {
   total=$(awk -F'|' '{ s += $2 } END { printf "%.0f", s }' "$1")
-  sort "$1" | cut -d'|' -f1-3 | grep -E "$MEDIA_RE" | while IFS='|' read -r _time size path; do
+  sort "$1" | cut -d'|' -f1,2,4- | grep -E "$MEDIA_RE" | while IFS='|' read -r _time size path; do
     [ "$total" -le "$3" ] && break
     # Never evict what the backup doesn't hold byte-for-byte (size check).
     [ "$(stat -c%s "$2/$path" 2>/dev/null)" = "$size" ] || continue
@@ -43,7 +46,7 @@ api() {
 }
 
 backup() { # $1 listing
-  grep -v '|_promote/' "$1" | while IFS='|' read -r _time size key epoch; do
+  grep -v '|_promote/' "$1" | while IFS='|' read -r _time size epoch key; do
     if ! echo "$key" | grep -qE "$KEY_RE"; then
       echo "skip unexpected key: $key" >&2
       continue
@@ -73,7 +76,7 @@ backup() { # $1 listing
 }
 
 promote() { # $1 listing
-  grep '|_promote/' "$1" | while IFS='|' read -r _time _size key _epoch; do
+  grep '|_promote/' "$1" | while IFS='|' read -r _time _size _epoch key; do
     path=${key#_promote/}
     # Only episode media: an old feed.xml on the NAS must never overwrite R2's newer one.
     if echo "|$path" | grep -qE "$MEDIA_RE" && [ -f "$DEST/$path" ]; then
@@ -103,6 +106,10 @@ main() {
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
   (umask 077 && printf 'Authorization: Bearer %s\n' "$UPLOAD_TOKEN" >"$work/auth")
+  # Temp files of a run that was killed (stop timeout, recreate). Only this job writes
+  # *.part under feeds/ (the uploader uses .tmp-*), and the lock says none is running now.
+  # -exec rm, not -delete: not every busybox build has -delete.
+  find "$DEST/feeds" -mindepth 2 -maxdepth 2 -name '*.part' -type f -exec rm -f {} + 2>/dev/null || :
   api "$BASE/_admin/list" >"$work/listing"
   backup "$work/listing"
   promote "$work/listing"
@@ -130,7 +137,12 @@ if [ "${R2_BACKUP_LIB:-}" != 1 ]; then
         today=$(date -u +%F)
         if [ "$(date -u +%H%M)" -ge "$at" ] && [ "$(cat "$LAST_RUN" 2>/dev/null)" != "$today" ]; then
           echo "$today" >"$LAST_RUN"
-          sh "$0" once || echo "$(date -u +%FT%TZ) FAILED" >&2
+          if ! sh "$0" once; then
+            # Retry within the same day instead of waiting 24 h: forget the date, back off 1 h.
+            echo "$(date -u +%FT%TZ) FAILED, retrying in 1 h" >&2
+            rm -f "$LAST_RUN"
+            sleep 3540
+          fi
         fi
         sleep 60
       done

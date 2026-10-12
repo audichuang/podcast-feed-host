@@ -30,6 +30,11 @@ function fakeBucket(files: Record<string, Uint8Array>) {
       if (!files[k]) return null;
       const m = meta(k);
       const data = files[k];
+      // R2 rejects validator dates it cannot represent (outside about 1678-2262).
+      for (const h of ["If-Modified-Since", "If-Unmodified-Since"]) {
+        const t = Date.parse(opts?.onlyIf?.get(h) ?? "");
+        if (t < Date.UTC(1678, 0, 1) || t > Date.UTC(2262, 0, 1)) throw new Error("InvalidArgument");
+      }
       const inm = opts?.onlyIf?.get("If-None-Match");
       const im = opts?.onlyIf?.get("If-Match");
       // Like R2: If-None-Match is a weak-compare list, If-Match a strong one.
@@ -185,7 +190,7 @@ test("admin API: token required; list, read show.json, delete", async () => {
   const E = "1767225600"; // 2026-01-01T00:00:00Z
   assert.equal(
     list,
-    `2026-01-01T00:00:00.000Z|2|${showKey}|${E}\n2026-01-01T00:00:00.000Z|3${MP3.replace("/", "|")}|${E}\n`,
+    `2026-01-01T00:00:00.000Z|2|${E}|${showKey}\n2026-01-01T00:00:00.000Z|3|${E}${MP3.replace("/", "|")}\n`,
   );
   const obj = await call(e, `/_admin/object/${showKey}`, { headers: auth });
   assert.equal(obj.headers.get("Last-Modified"), "Thu, 01 Jan 2026 00:00:00 GMT");
@@ -317,4 +322,12 @@ test("feed.xml and html vary by Accept-Encoding", async () => {
   const key = `feeds/${TOK}/feed.xml`;
   const r = await call(env({ [key]: new TextEncoder().encode("<rss/>") }), `/${key}`);
   assert.equal(r.headers.get("Vary"), "Accept-Encoding");
+});
+
+test("out-of-range validator dates are ignored instead of reaching R2", async () => {
+  const dates = ["Fri, 31 Dec 9999 23:59:59 GMT", "Mon, 01 Jan 1600 00:00:00 GMT"];
+  const rs = await Promise.all(
+    dates.map((d) => call(TEN(), MP3, { headers: { "If-Modified-Since": d, "If-Unmodified-Since": d } })),
+  );
+  for (const [i, r] of rs.entries()) assert.equal(r.status, 200, dates[i]);
 });

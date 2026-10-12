@@ -9,7 +9,7 @@ NAS 每日備份是 nas-ops 的 `r2-backup` service。**回滾**:拿掉 `cloudfl
 
 ```bash
 cd worker && npm install
-npm test && npm run typecheck && npm run lint   # 21 條離線測試 + oxlint
+npm test && npm run typecheck && npm run lint   # 22 條離線測試 + oxlint
 npm run build && npm run deploy  # cf deploy --prebuilt;UPLOAD_TOKEN 是 secret,設一次即可
 ```
 
@@ -22,8 +22,8 @@ NAS 每日 04:30 r2-backup:R2 → NAS 備份、補回被聽的舊集、把 R2 �
 ```
 
 **R2 是快取,NAS 是正本。** `backup/r2-backup.sh`(nas-ops `r2-backup` service,curl 映像):
-1. **備份**:`GET /_admin/list` 列出 R2(`uploadedISO|size|key|uploadedEpoch`),NAS 上沒有同大小、
-   同修改時間的就下載;下載用 `curl -R`,檔案 mtime = R2 上傳時間,所以 NAS 保留發布器的寫入順序
+1. **備份**:`GET /_admin/list` 列出 R2(`uploadedISO|size|uploadedEpoch|key`,key 放最後),NAS 上沒有
+   同大小、同修改時間的就下載(單集媒體例外:檔名含內容 hash,同名同大小即相同,NAS mtime 不動);下載用 `curl -R`,檔案 mtime = R2 上傳時間,所以 NAS 保留發布器的寫入順序
    (媒體 → show.json → feed.xml,dashboard 的健康檢查靠這個),沒變的檔不會每天重抓。
    暫存檔名帶隨機字串(這個目錄正在對外服務)。只寫 `DEST/feeds/<token>/<檔名>`,key 不合格式就跳過。
    **NAS 上從不刪**。
@@ -35,9 +35,12 @@ NAS 每日 04:30 r2-backup:R2 → NAS 備份、補回被聽的舊集、把 R2 �
 3. **修剪**:重新列出 R2,總量超過 `CAP_BYTES`(預設 7 GB)就從上傳時間最舊的開始刪,只刪
    `EPxx-*.mp3/pdf/html` 且 NAS 有同大小的檔。任何一步失敗(`set -e`,每輪獨立行程)就不會走到修剪。
 
-管理 API(`Authorization: Bearer <UPLOAD_TOKEN>`):`GET /_admin/list`(`uploaded|size|key`)、
-`GET|DELETE /_admin/object/<key>`。這把 token 本來就能覆寫每個 feed,刪除沒有增加破壞面。
-測試:`sh backup/test_r2_backup.sh`(busybox 也過)。手動跑一輪:
+管理 API(`Authorization: Bearer <UPLOAD_TOKEN>`):`GET /_admin/list`(`uploadedISO|size|uploadedEpoch|key`)、
+`GET|DELETE /_admin/object/<key>`(GET 帶 `Last-Modified` = R2 上傳時間)。這把 token 本來就能覆寫每個 feed,刪除沒有增加破壞面。
+測試:`sh backup/test_r2_backup.sh`(修剪挑選)與 `sh backup/test_r2_backup_e2e.sh`(對 `fake_worker.py`
+跑整支腳本:mtime 保留、第二輪不重抓、清掉被殺留下的 `.part`、怪 key 跳過、下載中斷不修剪、補回斷線保留
+marker;需要 python3、curl、flock)。兩支在 busybox 下也要過——部署映像是 busybox,本機 busybox 的
+applet 不一定一樣(`find -delete` 就是本機沒有、映像有)。失敗的排程會在同一天每小時重試。手動跑一輪:
 `docker exec podcast-feed-host-r2-backup-1 sh /r2-backup.sh once`。
 
 - **寫入介面與 `uploader/server.py` 相同**:路徑白名單、Bearer、每個回應帶 `X-Podcast-Uploader: 1`、成功 201。
@@ -59,7 +62,7 @@ NAS 每日 04:30 r2-backup:R2 → NAS 備份、補回被聽的舊集、把 R2 �
 - **100 MB 的 413 是 Cloudflare 邊緣回的**,不經 Worker,所以那個回應沒有 `X-Podcast-Uploader`。
 - **上傳上限 100 MB**(zone 方案的 request body 上限,Workers Paid 不會放寬)。96k mono ≈ 2.3 小時;
   發布器先傳 mp3 才寫 `feed.xml`,所以超限是安全失敗。
-- 測試:`node --test worker/test/index.test.ts`(21 條,離線,Node 24 原生跑 TS);lint:`npm run lint`(oxlint,correctness / suspicious / perf 全設 error)。
+- 測試:`node --test worker/test/index.test.ts`(22 條,離線,Node 24 原生跑 TS);lint:`npm run lint`(oxlint,correctness / suspicious / perf 全設 error)。
 
 ## 待決定
 

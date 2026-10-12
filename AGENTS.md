@@ -77,6 +77,9 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 ```bash
 python3 uploader/test_server.py     # 5 條
 python3 dashboard/test_server.py    # 31 條
+sh backup/test_r2_backup.sh         # 修剪挑選
+sh backup/test_r2_backup_e2e.sh     # 整支備份腳本對假 Worker
+(cd worker && npm test && npm run typecheck && npm run lint)   # Worker 22 條 + oxlint
 ```
 
 兩支都只用標準函式庫、離線可跑、無 fixture。**改了任一支 `server.py` 就跑對應那支**,不要只
