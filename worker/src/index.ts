@@ -49,6 +49,8 @@ function contentHeaders(path: string): Headers {
   if (TYPES[ext]) h.set("Content-Type", TYPES[ext]);
   if (ext === "mp3") h.set("Cache-Control", "public, max-age=31536000, immutable");
   if (path.endsWith("/feed.xml")) h.set("Cache-Control", "no-cache");
+  // Cloudflare compresses these at the edge; tell shared caches the body varies.
+  if (ext === "xml" || ext === "html") h.set("Vary", "Accept-Encoding");
   h.set("Accept-Ranges", "bytes");
   return h;
 }
@@ -100,49 +102,77 @@ function unsatisfiable(h: string, size: number): boolean {
   return m[1] === "" ? Number(m[2]) === 0 : Number(m[1]) >= size;
 }
 
+const ETAG_LIST = /^(\*|(W\/)?"[^"]*"(\s*,\s*(W\/)?"[^"]*")*)$/;
+const R2_MAX_KEY_BYTES = 1024;
+
+// R2 throws on a malformed validator; Caddy ignores one. Keep only well-formed ones.
+function conditionals(h: Headers): Headers {
+  const out = new Headers();
+  for (const k of ["If-None-Match", "If-Match"]) {
+    const v = h.get(k)?.trim();
+    if (v && ETAG_LIST.test(v)) out.set(k, v);
+  }
+  for (const k of ["If-Modified-Since", "If-Unmodified-Since"]) {
+    const v = h.get(k);
+    if (v && !Number.isNaN(Date.parse(v))) out.set(k, v);
+  }
+  return out;
+}
+
+const seconds = (d: Date | number) => Math.floor(Number(d) / 1000);
+
+// Which precondition stopped R2 from sending a body: a failed If-Match /
+// If-Unmodified-Since is 412; otherwise it was If-None-Match / If-Modified-Since (304).
+function preconditionFailed(cond: Headers, obj: R2Object): boolean {
+  const im = cond.get("If-Match");
+  if (im) return im !== "*" && !im.split(",").map((t) => t.trim()).includes(obj.httpEtag);
+  const ius = cond.get("If-Unmodified-Since");
+  return ius !== null && seconds(obj.uploaded) > seconds(Date.parse(ius));
+}
+
+// If-Range holds either a strong ETag or an HTTP-date (RFC 9110 §13.1.5).
+function ifRangeMatches(v: string, obj: R2Object): boolean {
+  if (v.startsWith('"')) return v === obj.httpEtag;
+  return !v.startsWith("W/") && seconds(Date.parse(v)) === seconds(obj.uploaded);
+}
+
+// GET and HEAD share one path so they always agree on status and headers; HEAD just
+// drops the body.
 async function fromR2(req: Request, env: Env, path: string): Promise<Response | null> {
   const key = path.slice(1);
+  if (new TextEncoder().encode(key).length > R2_MAX_KEY_BYTES) return null;
   const headers = contentHeaders(path);
-  const validators = (o: R2Object) => {
-    headers.set("ETag", o.httpEtag);
-    headers.set("Last-Modified", o.uploaded.toUTCString());
+  const isHead = req.method === "HEAD";
+  const send = (body: ReadableStream | null, status: number) => {
+    if (status >= 400) headers.delete("Cache-Control"); // never let caches keep an error
+    if (isHead && body) void body.cancel();
+    return new Response(isHead ? null : body, { status, headers });
   };
-  if (req.method === "HEAD") {
-    const obj = await env.BUCKET.head(key);
-    if (!obj) return null;
-    validators(obj);
-    if (req.headers.get("If-None-Match") === obj.httpEtag) {
-      return new Response(null, { status: 304, headers });
-    }
-    headers.set("Content-Length", String(obj.size));
-    return new Response(null, { headers });
-  }
-
+  const cond = conditionals(req.headers);
   const rangeHeader = req.headers.get("Range");
   let wantRange = singleRange(rangeHeader);
   let obj: R2Object | R2ObjectBody | null;
   try {
-    obj = await env.BUCKET.get(key, wantRange ? { range: req.headers, onlyIf: req.headers } : { onlyIf: req.headers });
+    obj = await env.BUCKET.get(
+      key,
+      wantRange ? { range: new Headers({ Range: rangeHeader ?? "" }), onlyIf: cond } : { onlyIf: cond },
+    );
   } catch (e) {
     if (rangeHeader) {
       const meta = await env.BUCKET.head(key);
       if (meta && unsatisfiable(rangeHeader, meta.size)) {
         headers.set("Content-Range", `bytes */${meta.size}`);
-        return new Response(null, { status: 416, headers });
+        return send(null, 416);
       }
     }
     throw e;
   }
   if (!obj) return null;
-  validators(obj);
-  if (!("body" in obj)) {
-    // If-Match / If-Unmodified-Since failing is 412; If-None-Match / If-Modified-Since is 304.
-    const precondition = req.headers.has("If-Match") || req.headers.has("If-Unmodified-Since");
-    return new Response(null, { status: precondition ? 412 : 304, headers });
-  }
-  // A mismatched If-Range means "send the whole representation" (RFC 9110 §13.1.5).
+  headers.set("ETag", obj.httpEtag);
+  headers.set("Last-Modified", obj.uploaded.toUTCString());
+  if (!("body" in obj)) return send(null, preconditionFailed(cond, obj) ? 412 : 304);
   const ifRange = req.headers.get("If-Range");
-  if (wantRange && ifRange && ifRange !== obj.httpEtag) {
+  if (wantRange && ifRange && !ifRangeMatches(ifRange, obj)) {
     await obj.body.cancel();
     obj = await env.BUCKET.get(key);
     if (!obj) return null;
@@ -155,15 +185,15 @@ async function fromR2(req: Request, env: Env, path: string): Promise<Response | 
     const end = r.length !== undefined ? Math.min(obj.size, start + r.length) - 1 : obj.size - 1;
     headers.set("Content-Range", `bytes ${start}-${end}/${obj.size}`);
     headers.set("Content-Length", String(end - start + 1));
-    return new Response(body, { status: 206, headers });
+    return send(body, 206);
   }
   headers.set("Content-Length", String(obj.size));
-  return new Response(body, { headers });
+  return send(body, 200);
 }
 
 async function fromNas(req: Request, env: Env, path: string): Promise<Response> {
   const fwd = new Headers();
-  for (const h of ["Range", "If-Range", "If-None-Match", "If-Modified-Since"]) {
+  for (const h of ["Range", "If-Range", "If-None-Match", "If-Modified-Since", "If-Match", "If-Unmodified-Since"]) {
     const v = req.headers.get(h);
     if (v) fwd.set(h, v);
   }
@@ -183,7 +213,11 @@ async function fromNas(req: Request, env: Env, path: string): Promise<Response> 
       // Hand Caddy's redirects (e.g. /feeds/<t> -> /feeds/<t>/) to the client unchanged.
       redirect: "manual",
     });
-    return new Response(res.body, res);
+    if (res.status < 400) return new Response(res.body, res);
+    // Caddy stamps "immutable, 1 year" on any *.mp3 response, 404 included.
+    const h = new Headers(res.headers);
+    h.delete("Cache-Control");
+    return new Response(res.body, { status: res.status, headers: h });
   } catch {
     return new Response("origin unavailable\n", { status: 502 });
   } finally {
@@ -192,7 +226,7 @@ async function fromNas(req: Request, env: Env, path: string): Promise<Response> 
 }
 
 // Admin API for the NAS backup job (backup/r2-backup.sh), same bearer token as uploads:
-//   GET    /_admin/list          -> "uploaded|size|key" per line, oldest-first sortable
+//   GET    /_admin/list          -> "uploadedISO|size|key|uploadedEpoch" per line, sortable
 //   GET    /_admin/object/<key>  -> raw object (incl. show.json, which the public side 403s)
 //   DELETE /_admin/object/<key>  -> 204
 // The token can already overwrite every feed, so delete adds no new destructive power.
@@ -204,7 +238,9 @@ async function handleAdmin(req: Request, env: Env, path: string): Promise<Respon
     do {
       // oxlint-disable-next-line no-await-in-loop -- each page needs the previous page's cursor
       const page = await env.BUCKET.list({ cursor, limit: 1000 });
-      for (const o of page.objects) lines.push(`${o.uploaded.toISOString()}|${o.size}|${o.key}`);
+      for (const o of page.objects) {
+        lines.push(`${o.uploaded.toISOString()}|${o.size}|${o.key}|${seconds(o.uploaded)}`);
+      }
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor);
     return new Response(lines.join("\n") + (lines.length ? "\n" : ""), { headers: MARKER });
@@ -214,7 +250,10 @@ async function handleAdmin(req: Request, env: Env, path: string): Promise<Respon
   if (req.method === "GET") {
     const obj = await env.BUCKET.get(key);
     if (!obj) return reply(404);
-    return new Response(obj.body, { headers: { ...MARKER, "Content-Length": String(obj.size) } });
+    // Last-Modified = R2 upload time, so the backup can keep it as the file's mtime (curl -R).
+    return new Response(obj.body, {
+      headers: { ...MARKER, "Content-Length": String(obj.size), "Last-Modified": obj.uploaded.toUTCString() },
+    });
   }
   if (req.method === "DELETE") {
     await env.BUCKET.delete(key);

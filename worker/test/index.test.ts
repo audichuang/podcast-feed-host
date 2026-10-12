@@ -32,7 +32,10 @@ function fakeBucket(files: Record<string, Uint8Array>) {
       const data = files[k];
       const inm = opts?.onlyIf?.get("If-None-Match");
       const im = opts?.onlyIf?.get("If-Match");
-      if ((inm && inm === m.httpEtag) || (im && im !== m.httpEtag)) return m;
+      // Like R2: If-None-Match is a weak-compare list, If-Match a strong one.
+      const inList = (v: string, weak: boolean) =>
+        v === "*" || v.split(",").map((t) => (weak ? t.trim().replace(/^W\//, "") : t.trim())).includes(m.httpEtag);
+      if ((inm && inList(inm, true)) || (im && !inList(im, false))) return m;
       const r = /^bytes=(\d*)-(\d*)$/.exec(opts?.range?.get("Range") ?? "");
       if (!r) return { ...m, body: stream(data) };
       if (r[1] === "") {
@@ -179,8 +182,14 @@ test("admin API: token required; list, read show.json, delete", async () => {
   assert.equal((await call(e, "/_admin/list")).status, 401);
   assert.equal((await call(e, `/_admin/object/${showKey}`)).status, 401);
   const list = await (await call(e, "/_admin/list", { headers: auth })).text();
-  assert.equal(list, `2026-01-01T00:00:00.000Z|2|${showKey}\n2026-01-01T00:00:00.000Z|3${MP3.replace("/", "|")}\n`);
-  assert.equal(await (await call(e, `/_admin/object/${showKey}`, { headers: auth })).text(), "{}");
+  const E = "1767225600"; // 2026-01-01T00:00:00Z
+  assert.equal(
+    list,
+    `2026-01-01T00:00:00.000Z|2|${showKey}|${E}\n2026-01-01T00:00:00.000Z|3${MP3.replace("/", "|")}|${E}\n`,
+  );
+  const obj = await call(e, `/_admin/object/${showKey}`, { headers: auth });
+  assert.equal(obj.headers.get("Last-Modified"), "Thu, 01 Jan 2026 00:00:00 GMT");
+  assert.equal(await obj.text(), "{}");
   assert.equal((await call(e, `/feeds/${TOK}/show.json`)).status, 403); // public side still denied
   const del = await call(e, `/_admin/object${MP3}`, { method: "DELETE", headers: auth });
   assert.equal(del.status, 204);
@@ -251,4 +260,61 @@ test("NAS fallback is not edge-cached, forwards If-Range, and passes redirects t
   assert.equal(init.cache, "no-store");
   assert.equal(init.redirect, "manual");
   assert.equal(new Headers(init.headers).get("If-Range"), '"x"');
+});
+
+test("HEAD follows the same Range / conditional logic as GET, without a body", async () => {
+  const r = await call(TEN(), MP3, { method: "HEAD", headers: { Range: "bytes=2-5" } });
+  assert.equal(r.status, 206);
+  assert.equal(r.headers.get("Content-Range"), "bytes 2-5/10");
+  assert.equal((await r.arrayBuffer()).byteLength, 0);
+  const ims = await call(TEN(), MP3, {
+    method: "HEAD",
+    headers: { "If-None-Match": `W/"${MP3.slice(1)}", "x"` },
+  });
+  assert.equal(ims.status, 304);
+});
+
+test("malformed validators are ignored instead of failing the request", async () => {
+  const r = await call(TEN(), MP3, { headers: { "If-Match": "garbage", "If-None-Match": "nope" } });
+  assert.equal(r.status, 200);
+});
+
+test("412 only when If-Match itself fails; passing If-Match + matching If-None-Match is 304", async () => {
+  const etag = `"${MP3.slice(1)}"`;
+  const r = await call(TEN(), MP3, { headers: { "If-Match": etag, "If-None-Match": etag } });
+  assert.equal(r.status, 304);
+  const bad = await call(TEN(), MP3, { headers: { "If-Match": '"other"' } });
+  assert.equal(bad.status, 412);
+  assert.equal(bad.headers.get("Cache-Control"), null); // errors are never cacheable
+});
+
+test("If-Range with an HTTP-date equal to Last-Modified keeps the range", async () => {
+  const r = await call(TEN(), MP3, {
+    headers: { Range: "bytes=0-1", "If-Range": "Thu, 01 Jan 2026 00:00:00 GMT" },
+  });
+  assert.equal(r.status, 206);
+});
+
+test("NAS error responses lose the immutable Cache-Control; over-long keys skip R2", async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("nope", {
+      status: 404,
+      headers: { "Cache-Control": "public, max-age=31536000, immutable" },
+    })) as typeof fetch;
+  try {
+    const r = await call(env(), MP3);
+    assert.equal(r.status, 404);
+    assert.equal(r.headers.get("Cache-Control"), null);
+    const long = await call(env(), `/feeds/${TOK}/${"a".repeat(1100)}.mp3`);
+    assert.equal(long.status, 404);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("feed.xml and html vary by Accept-Encoding", async () => {
+  const key = `feeds/${TOK}/feed.xml`;
+  const r = await call(env({ [key]: new TextEncoder().encode("<rss/>") }), `/${key}`);
+  assert.equal(r.headers.get("Vary"), "Accept-Encoding");
 });

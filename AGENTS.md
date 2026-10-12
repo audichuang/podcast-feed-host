@@ -38,7 +38,8 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 ## 哪個服務斷了會怎樣
 
 - **Worker 斷** → 全部訂閱者抓不到、發布也失敗。回滾(拿掉 route)讓流量直接回 tunnel → caddy。
-- **caddy 斷** → 只有「R2 裡沒有」的檔抓不到(目前是大部分舊集與舊節目的 feed.xml)。
+- **caddy 斷** → 只有「R2 裡沒有」的檔抓不到:目前是大部分舊集的 mp3。每個節目的 feed.xml、
+  index.html、show.json、封面都已在 R2(2026-10-12 從 NAS 補進去),feed 照常可訂閱。
 - **r2-backup 斷** → 新集只剩 R2 一份;healthcheck 36 小時沒有成功就 unhealthy,看門狗會推播。
 - **uploader** 已不在發布路徑上(只是回滾用),動它不影響發布。
 - 改 Worker 前確認沒有發布在跑:Worker 部署是原子切換,但發布中途換版仍可能讓某個 PUT 失敗;
