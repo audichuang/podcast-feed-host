@@ -64,6 +64,10 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 - **`Caddyfile` 生效的是掛載那份**(ops repo 的 `Caddyfile`,從 Komodo clone 唯讀掛進 caddy);
   image 裡也 `COPY` 了一份當預設,兩份保持一致。單檔 bind 綁的是容器啟動時的 inode,只改
   Caddyfile 的部署之後要 restart caddy。
+- **`backup/r2-backup.sh` 與 ops repo 的同名檔必須逐位元組相同。** 改了它:同步 → Komodo 部署 →
+  `RestartContainer` r2-backup(單檔 bind,同上面 Caddyfile 的 inode 問題;不重啟就還在跑舊腳本)。
+  `/_admin/list` 的欄位順序是 Worker 與這支腳本之間的契約,改格式時兩邊同一批上線——只上 Worker
+  的話,當晚的備份會把每個 key 都當成格式不符而跳過。
 - **三個 image 都由 CI 建、NAS 只 pull。** 沒有本機 build、沒有 bind-mount 程式碼。
   `dashboard/server.py` 是烤進 image 的 —— **改了程式要 push 讓 CI 建**,再照上面換 digest。
 - **對外那條 tunnel 是 remote-managed(`tunnel run --token`):ingress 在 Cloudflare 端,NAS 上
@@ -71,6 +75,12 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
   `audinas` 連得到這台(其餘的 origin 是別台機器);而
   `PUT …/cfd_tunnel/<id>/configurations` **是整份覆蓋** —— 先 GET 存一份再改,少貼一條就把
   `podcast.audichuang.app` 那條跟其他七條一起抹掉。cloudflared 本身也是 Komodo stack `cloudflare`。
+
+## 在正式網址驗收
+
+- **看起來唯讀的請求也會寫 R2**:經 Worker 對「只在 NAS」的單集做 ≥ 1 MB 的 GET,會在 R2 留
+  `_promote/` 標記,隔天備份就把那集補進 R2。驗收完用 `/_admin/list` 找出標記並 DELETE。
+- **清測試資料先刪 R2、再刪 NAS**:備份只增不刪,R2 還在的東西隔天會被拉回 NAS。
 
 ## 改完必跑
 
