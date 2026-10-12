@@ -1,6 +1,6 @@
 # AGENTS.md — podcast-feed-host
 
-在 NAS 上把 podcast RSS feed 目錄對外服務的三個容器。**架構、安裝、驗收指令、目錄結構、
+在 NAS 上把 podcast RSS feed 目錄對外服務的四個容器,前面再加一層 Cloudflare Worker + R2(`worker/`)。**架構、安裝、驗收指令、目錄結構、
 dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 README 與程式碼給不了的
 意圖與地雷。工作根 `../AGENTS.md` 的跨專案規則(secrets → Doppler、commit/push 要明講)照舊生效。
 
@@ -35,12 +35,14 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 - **dashboard 的刪除能力 = `/srv` 的掛載模式**(`writable()` 就是 `os.access(ROOT, W_OK)`)。
   要緊急關掉全部破壞性動作:compose 改回 `:ro` + restart,不必動程式。
 
-## caddy 與 uploader 是既有生產服務
+## 哪個服務斷了會怎樣
 
-- caddy 斷 → 訂閱者抓不到;uploader 斷 → **正在跑的那一季發布會壞掉**。
-- **動它們之前先確認沒有發布在跑**:比對每個 feed 的 `feed.xml` mtime 與該目錄最新媒體檔的
-  mtime,有檔案比 `feed.xml` 新就是還在飛。(發布器的順序是「全部媒體 → show.json → feed.xml」。)
-- 部署會重建哪個容器就中斷哪個,uploader 尤其要挑沒有發布在跑的時候(見下一節)。
+- **Worker 斷** → 全部訂閱者抓不到、發布也失敗。回滾(拿掉 route)讓流量直接回 tunnel → caddy。
+- **caddy 斷** → 只有「R2 裡沒有」的檔抓不到(目前是大部分舊集與舊節目的 feed.xml)。
+- **r2-backup 斷** → 新集只剩 R2 一份;healthcheck 36 小時沒有成功就 unhealthy,看門狗會推播。
+- **uploader** 已不在發布路徑上(只是回滾用),動它不影響發布。
+- 改 Worker 前確認沒有發布在跑:Worker 部署是原子切換,但發布中途換版仍可能讓某個 PUT 失敗;
+  發布器的順序是「全部媒體 → show.json → feed.xml」,feed.xml 寫完才算完成。
 
 ## NAS 上的部署(2026-10-06 起由 Komodo 管)
 

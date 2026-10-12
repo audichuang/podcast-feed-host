@@ -24,6 +24,11 @@ MCP publish_series ──內網 HTTP PUT(Bearer token)──→ uploader 容器(
 > **uploader 只綁 NAS 的 LAN IP、不要加進 Cloudflare Tunnel ingress、並在防火牆把該
 > port 擋掉 WAN**——寫埠一旦外曝等於任何人都能覆寫你的 feed。
 
+> **2026-10-12 起,作者自己的部署前面多了一層 Cloudflare Worker + R2**(`worker/`):公開網址由
+> Worker 服務,R2 沒有的檔才經 tunnel 回到這裡的 Caddy;發布器直接傳到 Worker;NAS 每天由
+> `r2-backup` service 把 R2 完整備份回來。架構、管理 API 與回滾見 [worker/README.md](worker/README.md)。
+> 下面是 NAS 這一層本身的安裝與說明。
+
 ## 快速開始(NAS 端)
 
 ```bash

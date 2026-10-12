@@ -85,35 +85,85 @@ async function handlePut(req: Request, env: Env, path: string): Promise<Response
   return reply(201);
 }
 
+// Only a single "bytes=a-b" / "bytes=a-" / "bytes=-n" range is honoured (what Caddy does
+// for players); anything else is ignored and the whole object goes out as a 200.
+function singleRange(h: string | null): boolean {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(h ?? "");
+  if (!m || (m[1] === "" && m[2] === "")) return false;
+  return m[1] === "" || m[2] === "" || Number(m[1]) <= Number(m[2]);
+}
+
+// Range start at/after EOF (or "bytes=-0"): the request is unsatisfiable, not an R2 fault.
+function unsatisfiable(h: string, size: number): boolean {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(h);
+  if (!m) return false;
+  return m[1] === "" ? Number(m[2]) === 0 : Number(m[1]) >= size;
+}
+
 async function fromR2(req: Request, env: Env, path: string): Promise<Response | null> {
   const key = path.slice(1);
   const headers = contentHeaders(path);
+  const validators = (o: R2Object) => {
+    headers.set("ETag", o.httpEtag);
+    headers.set("Last-Modified", o.uploaded.toUTCString());
+  };
   if (req.method === "HEAD") {
     const obj = await env.BUCKET.head(key);
     if (!obj) return null;
-    headers.set("ETag", obj.httpEtag);
+    validators(obj);
+    if (req.headers.get("If-None-Match") === obj.httpEtag) {
+      return new Response(null, { status: 304, headers });
+    }
     headers.set("Content-Length", String(obj.size));
     return new Response(null, { headers });
   }
-  const obj = await env.BUCKET.get(key, { range: req.headers, onlyIf: req.headers });
+
+  const rangeHeader = req.headers.get("Range");
+  let wantRange = singleRange(rangeHeader);
+  let obj: R2Object | R2ObjectBody | null;
+  try {
+    obj = await env.BUCKET.get(key, wantRange ? { range: req.headers, onlyIf: req.headers } : { onlyIf: req.headers });
+  } catch (e) {
+    if (rangeHeader) {
+      const meta = await env.BUCKET.head(key);
+      if (meta && unsatisfiable(rangeHeader, meta.size)) {
+        headers.set("Content-Range", `bytes */${meta.size}`);
+        return new Response(null, { status: 416, headers });
+      }
+    }
+    throw e;
+  }
   if (!obj) return null;
-  headers.set("ETag", obj.httpEtag);
-  if (!("body" in obj)) return new Response(null, { status: 304, headers });
-  if (obj.range && req.headers.has("Range")) {
+  validators(obj);
+  if (!("body" in obj)) {
+    // If-Match / If-Unmodified-Since failing is 412; If-None-Match / If-Modified-Since is 304.
+    const precondition = req.headers.has("If-Match") || req.headers.has("If-Unmodified-Since");
+    return new Response(null, { status: precondition ? 412 : 304, headers });
+  }
+  // A mismatched If-Range means "send the whole representation" (RFC 9110 §13.1.5).
+  const ifRange = req.headers.get("If-Range");
+  if (wantRange && ifRange && ifRange !== obj.httpEtag) {
+    await obj.body.cancel();
+    obj = await env.BUCKET.get(key);
+    if (!obj) return null;
+    wantRange = false;
+  }
+  const body = (obj as R2ObjectBody).body;
+  if (wantRange && obj.range) {
     const r = obj.range as { offset?: number; length?: number; suffix?: number };
-    const start = r.suffix !== undefined ? obj.size - r.suffix : (r.offset ?? 0);
-    const end = r.length !== undefined ? start + r.length - 1 : obj.size - 1;
+    const start = r.suffix !== undefined ? Math.max(0, obj.size - r.suffix) : (r.offset ?? 0);
+    const end = r.length !== undefined ? Math.min(obj.size, start + r.length) - 1 : obj.size - 1;
     headers.set("Content-Range", `bytes ${start}-${end}/${obj.size}`);
     headers.set("Content-Length", String(end - start + 1));
-    return new Response(obj.body, { status: 206, headers });
+    return new Response(body, { status: 206, headers });
   }
   headers.set("Content-Length", String(obj.size));
-  return new Response(obj.body, { headers });
+  return new Response(body, { headers });
 }
 
 async function fromNas(req: Request, env: Env, path: string): Promise<Response> {
   const fwd = new Headers();
-  for (const h of ["Range", "If-None-Match", "If-Modified-Since"]) {
+  for (const h of ["Range", "If-Range", "If-None-Match", "If-Modified-Since"]) {
     const v = req.headers.get(h);
     if (v) fwd.set(h, v);
   }
@@ -126,6 +176,12 @@ async function fromNas(req: Request, env: Env, path: string): Promise<Response> 
       method: req.method,
       headers: fwd,
       signal: ctrl.signal,
+      // Not cached at the edge under the podcast-nas hostname: Caddy marks media immutable
+      // for a year, so a cached copy would outlive a takedown on both R2 and the NAS, and
+      // every PoP would pull its own full copy from the NAS.
+      cache: "no-store",
+      // Hand Caddy's redirects (e.g. /feeds/<t> -> /feeds/<t>/) to the client unchanged.
+      redirect: "manual",
     });
     return new Response(res.body, res);
   } catch {
@@ -146,6 +202,7 @@ async function handleAdmin(req: Request, env: Env, path: string): Promise<Respon
     const lines: string[] = [];
     let cursor: string | undefined;
     do {
+      // oxlint-disable-next-line no-await-in-loop -- each page needs the previous page's cursor
       const page = await env.BUCKET.list({ cursor, limit: 1000 });
       for (const o of page.objects) lines.push(`${o.uploaded.toISOString()}|${o.size}|${o.key}`);
       cursor = page.truncated ? page.cursor : undefined;
@@ -193,7 +250,6 @@ export default {
     try {
       r2 = await fromR2(req, env, path);
     } catch (e) {
-      if (req.headers.has("Range")) return new Response(null, { status: 416 });
       console.error(JSON.stringify({ msg: "r2 error", path, err: String(e) }));
       return new Response(null, { status: 500 });
     }

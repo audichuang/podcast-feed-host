@@ -13,6 +13,8 @@ set -eu
 BASE=${BASE:-https://podcast.audichuang.app}
 DEST=${DEST:-/data}
 CAP_BYTES=${CAP_BYTES:-7000000000} # 70% of the 10 GB R2 free tier
+LOCK=${LOCK:-/tmp/r2-backup.lock}       # one run at a time (manual `once` vs the loop)
+LAST_OK=${LAST_OK:-/tmp/r2-backup.last-ok} # touched on success; the compose healthcheck reads it
 
 # Only episode media is evictable; feed.xml / index.html / artwork always stay in R2.
 MEDIA_RE='\|feeds/[a-z2-7]{24}/EP[0-9]{2}-[0-9a-f]{8}\.(mp3|pdf|html)$'
@@ -32,9 +34,9 @@ pick_evictions() {
   done
 }
 
+# The token goes in through a 0600 header file, never argv (argv is visible in ps).
 api() {
-  curl -fsS --retry 3 --retry-all-errors --max-time 900 \
-    -H "Authorization: Bearer $UPLOAD_TOKEN" "$@"
+  curl -fsS --retry 3 --retry-all-errors --max-time 900 -H "@$work/auth" "$@"
 }
 
 backup() { # $1 listing
@@ -48,7 +50,10 @@ backup() { # $1 listing
       continue # content-addressed: same name + size = same bytes
     fi
     mkdir -p "${dst%/*}"
-    api -o "$dst.part" "$BASE/_admin/object/$key"
+    if ! api -o "$dst.part" "$BASE/_admin/object/$key"; then
+      rm -f "$dst.part" # never leave a partial file in the directory caddy serves
+      return 1
+    fi
     if [ "$(stat -c%s "$dst.part")" != "$size" ]; then
       rm -f "$dst.part"
       echo "size mismatch: $key" >&2
@@ -61,9 +66,11 @@ backup() { # $1 listing
 promote() { # $1 listing
   grep '|_promote/' "$1" | while IFS='|' read -r _time _size key; do
     path=${key#_promote/}
-    if echo "$path" | grep -qE "$KEY_RE" && [ -f "$DEST/$path" ]; then
+    # Only episode media: an old feed.xml on the NAS must never overwrite R2's newer one.
+    if echo "|$path" | grep -qE "$MEDIA_RE" && [ -f "$DEST/$path" ]; then
+      # A network-level failure is "try again tomorrow", not "abort the run".
       code=$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --max-time 900 -X PUT \
-        -H "Authorization: Bearer $UPLOAD_TOKEN" -T "$DEST/$path" "$BASE/$path")
+        -H "@$work/auth" -T "$DEST/$path" "$BASE/$path") || code=000
       # 413 = over the Worker's 100 MB body limit (old 256k uploads): stays NAS-only.
       case $code in
         201 | 413) ;;
@@ -79,8 +86,14 @@ promote() { # $1 listing
 
 main() {
   : "${UPLOAD_TOKEN:?}"
+  exec 9>"$LOCK"
+  flock -n 9 || {
+    echo "another run holds $LOCK" >&2
+    return 1
+  }
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
+  (umask 077 && printf 'Authorization: Bearer %s\n' "$UPLOAD_TOKEN" >"$work/auth")
   api "$BASE/_admin/list" >"$work/listing"
   backup "$work/listing"
   promote "$work/listing"
@@ -89,6 +102,7 @@ main() {
   while read -r key; do
     api -X DELETE "$BASE/_admin/object/$key" >/dev/null
   done <"$work/evict"
+  touch "$LAST_OK"
   echo "$(date -u +%FT%TZ) ok: $(wc -l <"$work/listing") objects in R2, evicted $(wc -l <"$work/evict")"
 }
 
@@ -96,6 +110,7 @@ if [ "${R2_BACKUP_LIB:-}" != 1 ]; then
   case "${1:-once}" in
     once) main ;;
     loop)
+      touch "$LAST_OK" # container start counts as healthy until the first run is due
       # Each run is its own process: `main || ...` would switch off set -e inside main,
       # and a failed backup must never fall through to eviction.
       while :; do

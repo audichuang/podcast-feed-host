@@ -96,6 +96,10 @@ services:
       BASE: ${R2_FRONT_URL:-https://podcast.example.com}  # the Worker's public URL
       BACKUP_AT_UTC: "20:30"
       DEST: /data
+    healthcheck:               # unhealthy after 36 h without a successful run
+      test: ["CMD-SHELL", "[ -n \"$$(find /tmp/r2-backup.last-ok -mmin -2160 2>/dev/null)\" ]"]
+      interval: 10m
+      timeout: 10s
     volumes:
       - ./backup/r2-backup.sh:/r2-backup.sh:ro
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/data   # rw: writes the backup; no ports

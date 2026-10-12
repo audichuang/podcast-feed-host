@@ -7,24 +7,45 @@ import worker from "../src/index.ts";
 const TOK = "abcdefghijklmnopqrstuvwx"; // 24 chars of [a-z2-7]
 const MP3 = `/feeds/${TOK}/EP01-0123abcd.mp3`;
 
+const stream = (b: Uint8Array) => new Blob([b]).stream();
+
 function fakeBucket(files: Record<string, Uint8Array>) {
-  const meta = (k: string) => ({ size: files[k].length, httpEtag: `"${k}"` });
+  const meta = (k: string) => ({
+    size: files[k].length,
+    httpEtag: `"${k}"`,
+    uploaded: new Date("2026-01-01T00:00:00Z"),
+  });
   return {
     files,
+    failNext: false,
     async head(k: string) {
       return files[k] ? meta(k) : null;
     },
-    async get(k: string, opts?: { range: Headers }) {
+    // Mirrors R2: onlyIf failure -> object without body; range start past EOF -> throws.
+    async get(k: string, opts?: { range?: Headers; onlyIf?: Headers }) {
+      if (this.failNext) {
+        this.failNext = false;
+        throw new Error("R2 internal error");
+      }
       if (!files[k]) return null;
-      const m = /bytes=(\d+)-(\d*)/.exec(opts?.range.get("Range") ?? "");
+      const m = meta(k);
       const data = files[k];
-      if (!m) return { ...meta(k), body: new Blob([data]).stream() };
-      const start = Number(m[1]);
-      const end = m[2] ? Number(m[2]) : data.length - 1;
+      const inm = opts?.onlyIf?.get("If-None-Match");
+      const im = opts?.onlyIf?.get("If-Match");
+      if ((inm && inm === m.httpEtag) || (im && im !== m.httpEtag)) return m;
+      const r = /^bytes=(\d*)-(\d*)$/.exec(opts?.range?.get("Range") ?? "");
+      if (!r) return { ...m, body: stream(data) };
+      if (r[1] === "") {
+        const n = Number(r[2]);
+        return { ...m, range: { suffix: n }, body: stream(data.slice(Math.max(0, data.length - n))) };
+      }
+      const start = Number(r[1]);
+      if (start >= data.length) throw new Error("InvalidRange (10039)");
+      const end = r[2] ? Math.min(Number(r[2]), data.length - 1) : data.length - 1;
       return {
-        ...meta(k),
+        ...m,
         range: { offset: start, length: end - start + 1 },
-        body: new Blob([data.slice(start, end + 1)]).stream(),
+        body: stream(data.slice(start, end + 1)),
       };
     },
     async list() {
@@ -50,8 +71,10 @@ function env(files: Record<string, Uint8Array> = {}) {
 
 let nasCalls: string[] = [];
 let nasBodyBytes = 8;
-globalThis.fetch = (async (url: string) => {
+let nasInits: RequestInit[] = [];
+globalThis.fetch = (async (url: string, init: RequestInit) => {
   nasCalls.push(url);
+  nasInits.push(init);
   return new Response("from-nas", {
     status: 200,
     headers: { "Content-Length": String(nasBodyBytes) },
@@ -177,4 +200,55 @@ test("publisher can PUT show.json even though reading it is 403", async () => {
   assert.equal((await call(e, showPath)).status, 403);
   const anon = await call(e, showPath, { method: "PUT", body: "{}", headers: { "Content-Length": "2" } });
   assert.equal(anon.status, 401);
+});
+
+const TEN = () => env({ [MP3.slice(1)]: new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) });
+
+test("unsatisfiable range is 416 with Content-Range */size; other R2 errors are 500", async () => {
+  const r = await call(TEN(), MP3, { headers: { Range: "bytes=10-" } });
+  assert.equal(r.status, 416);
+  assert.equal(r.headers.get("Content-Range"), "bytes */10");
+  const e = TEN();
+  e.BUCKET.failNext = true;
+  assert.equal((await call(e, MP3, { headers: { Range: "bytes=0-1" } })).status, 500);
+});
+
+test("multi-range or invalid Range gets the whole object as 200", async () => {
+  const ranges = ["bytes=0-1,5-6", "abc", "bytes=5-2"];
+  const responses = await Promise.all(ranges.map((Range) => call(TEN(), MP3, { headers: { Range } })));
+  const sizes = await Promise.all(responses.map((r) => r.arrayBuffer().then((b) => b.byteLength)));
+  for (const [i, r] of responses.entries()) {
+    assert.equal(r.status, 200, ranges[i]);
+    assert.equal(r.headers.get("Content-Range"), null);
+    assert.equal(sizes[i], 10);
+  }
+});
+
+test("suffix range and If-Range", async () => {
+  const s = await call(TEN(), MP3, { headers: { Range: "bytes=-3" } });
+  assert.equal(s.headers.get("Content-Range"), "bytes 7-9/10");
+  const etag = `"${MP3.slice(1)}"`;
+  const hit = await call(TEN(), MP3, { headers: { Range: "bytes=0-1", "If-Range": etag } });
+  assert.equal(hit.status, 206);
+  const miss = await call(TEN(), MP3, { headers: { Range: "bytes=0-1", "If-Range": '"stale"' } });
+  assert.equal(miss.status, 200);
+  assert.equal((await miss.arrayBuffer()).byteLength, 10);
+});
+
+test("conditionals: 304 for If-None-Match (GET and HEAD), 412 for failed If-Match, Last-Modified set", async () => {
+  const etag = `"${MP3.slice(1)}"`;
+  assert.equal((await call(TEN(), MP3, { headers: { "If-None-Match": etag } })).status, 304);
+  assert.equal((await call(TEN(), MP3, { method: "HEAD", headers: { "If-None-Match": etag } })).status, 304);
+  assert.equal((await call(TEN(), MP3, { headers: { "If-Match": '"other"' } })).status, 412);
+  const r = await call(TEN(), MP3);
+  assert.equal(r.headers.get("Last-Modified"), "Thu, 01 Jan 2026 00:00:00 GMT");
+});
+
+test("NAS fallback is not edge-cached, forwards If-Range, and passes redirects through", async () => {
+  nasInits = [];
+  await call(env(), MP3, { headers: { "If-Range": '"x"', Range: "bytes=0-1" } });
+  const init = nasInits[0];
+  assert.equal(init.cache, "no-store");
+  assert.equal(init.redirect, "manual");
+  assert.equal(new Headers(init.headers).get("If-Range"), '"x"');
 });
