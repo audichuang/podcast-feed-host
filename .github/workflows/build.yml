@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "3.x"}
       # dashboard 的縮圖測試在沒有 Pillow 時會自己跳過 —— CI 裝上,讓它真的跑到
       - run: pip install --quiet pillow
