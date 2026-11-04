@@ -1,0 +1,14 @@
+# Base images are pinned to version@digest so a rebuild never silently changes them
+# (python:3-alpine moved to 3.15 while the dashboard ran 3.14; caddy sat on 2.11.4 for
+# months). Dependabot opens a PR when a newer base exists; merging it rebuilds via CI,
+# then bump the digest in nas-ops and deploy (see AGENTS.md).
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories: ["/", "/uploader", "/dashboard"]
+    schedule: {interval: weekly}
+    groups:
+      base-images: {patterns: ["*"]}
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: {interval: monthly}

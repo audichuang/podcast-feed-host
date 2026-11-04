@@ -3,7 +3,7 @@
 # 解碼 529 MB,瀏覽器會直接放棄畫後面幾張,而標準函式庫沒有 JPEG decoder。
 # musllinux wheel(amd64 與 arm64 都有)現成,不編譯。
 # Pillow 若不在,server.py 會自動退回原圖:頁面仍然正確,只是很重。
-FROM python:3-alpine
+FROM python:3.14-alpine@sha256:eb2c62658b8d51bff0acc408504b76521d02030de56a8a3c1e830083e89b89d2
 RUN pip install --no-cache-dir --only-binary=:all: pillow
 WORKDIR /app
 # 程式烤進 image,不 bind-mount:更新走 CI → GHCR → watchtower,與 caddy/uploader
