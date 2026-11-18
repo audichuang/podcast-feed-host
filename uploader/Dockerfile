@@ -1,5 +1,5 @@
 # stdlib-only Python uploader: interpreter + one file. Content bind-mounted at runtime.
-FROM python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8
+FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd
 COPY server.py /app/server.py
 ENV PORT=80
 EXPOSE 80
