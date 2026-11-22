@@ -2,7 +2,7 @@
 
 在 NAS 上把 podcast RSS feed 目錄對外服務的四個容器,前面再加一層 Cloudflare Worker + R2(`worker/`)。**架構、安裝、驗收指令、目錄結構、
 dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 README 與程式碼給不了的
-意圖與地雷。工作根 `../AGENTS.md` 的跨專案規則(secrets → Doppler、commit/push 要明講)照舊生效。
+意圖與地雷。
 
 ## 核心不變式:讀寫分離
 
