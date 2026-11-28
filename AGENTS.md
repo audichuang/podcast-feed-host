@@ -99,5 +99,6 @@ sh backup/test_r2_backup_e2e.sh     # 整支備份腳本對假 Worker
 
 - **使用者點名任務即授權該任務所需的部署**(例:「加一個 dashboard」含建容器),照上面的
   Komodo 流程做;事後回報影響半徑與回滾路徑,並貼出非目標容器 ID 未變的證據。
-- 沒被點名的服務、`git commit`/`push`、改發布身分或 tunnel 設定 —— 一律先問。
+- 程式與文件的改動在 worktree 分支上 commit、push 分支並開 PR 給使用者看,不用先問;PR 等使用者說才合併(使用者說「自己提 PR、沒問題就併進去」時,那件事可以自己合併)。
+- 沒被點名的服務、推或合併到 `main`、改發布身分或 tunnel 設定 —— 一律先問。
 - NAS 上的操作分層(看／彈／改／炸)走 `nas-container` skill,本檔不重複。
