@@ -57,7 +57,7 @@ dashboard 的刪除判準,全部在 [README.md](README.md)** ——本檔只寫 
 - **改設定或換 image = 改 ops repo → commit → 在 Komodo 鎖定該 SHA → DeployStack。**
   不用 SSH `compose up`、不用 Container Manager(CM 專案已刪;`/volume5/docker/podcast` 只剩
   回滾副本與資料,放了 `MANAGED-BY-KOMODO`)。流程細節走 `nas-container` skill 的 Komodo 參考檔。
-- **更新 image 沒有自動化。** CI 照樣每次 push 建三個 image 推 GHCR(`latest` + `sha-<short>`),
+- **更新 image 沒有自動化。** push 到 `main` 且改到 Dockerfile／Caddyfile／uploader／dashboard 時,CI 建三個 image 推 GHCR(`latest` + `sha-<short>`),
   但沒有東西會自己拉。要上線:取 CI 推的 `sha-<short>` tag 的 digest,改 ops repo 的 `image:`。
   **uploader 只在沒有發布在跑時更新**,部署時 `services` 只列要換的那個。
 - `UPLOAD_TOKEN` 在 audinas Periphery `[secrets]`(`PODCAST_UPLOAD_TOKEN`),不在任何檔案裡。
@@ -99,5 +99,6 @@ sh backup/test_r2_backup_e2e.sh     # 整支備份腳本對假 Worker
 
 - **使用者點名任務即授權該任務所需的部署**(例:「加一個 dashboard」含建容器),照上面的
   Komodo 流程做;事後回報影響半徑與回滾路徑,並貼出非目標容器 ID 未變的證據。
-- 沒被點名的服務、`git commit`/`push`、改發布身分或 tunnel 設定 —— 一律先問。
+- 程式與文件的改動在 worktree 分支上 commit、push 分支並開 PR 給使用者看,不用先問;PR 等使用者說才合併(使用者說「自己提 PR、沒問題就併進去」時,那件事可以自己合併)。
+- 沒被點名的服務、推或合併到 `main`、改發布身分或 tunnel 設定 —— 一律先問。
 - NAS 上的操作分層(看／彈／改／炸)走 `nas-container` skill,本檔不重複。
